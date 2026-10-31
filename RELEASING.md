@@ -8,13 +8,13 @@ The distribution name, repository name and installed command are **mbmerge**. Th
 
 `VERSION` in [merge_mbtiles.py](merge_mbtiles.py) is the single version source. Setuptools reads that literal for wheel/sdist metadata; the CLI prints it and `mbmerge.__version__` exposes it. Do not duplicate a version in pyproject.toml. The on-disk `SCHEMA_VERSION` is independent and follows the compatibility rules in [ARCHITECTURE.md](ARCHITECTURE.md).
 
-The first public release can be `1.1.0`; the earlier working versions need not have public releases. Use tags `v1.1.0`, `v1.1.1`, etc. After publication, never replace a version or move its release tag. Publish a new version for changes.
+This checkout prepares `2.0.0`, a major change from the version 1.x supplied-zoom merger. Use tags `v2.0.0`, `v2.0.1`, etc. After publication, never replace a version or move its release tag. Publish a new version for changes. Updating this checkout or pushing its branch does not create a release.
 
-- Patch, e.g. `1.1.1`: compatible fixes.
-- Minor, e.g. `1.2.0`: compatible new functionality.
-- Major, e.g. `2.0.0`: incompatible public CLI/data-contract changes.
+- Patch, e.g. `2.0.1`: compatible fixes.
+- Minor, e.g. `2.1.0`: compatible new functionality.
+- Major, e.g. `3.0.0` after version 2: incompatible public CLI/data-contract changes.
 
-Python prerelease versions use forms such as `1.2.0rc1`; a matching tag is `v1.2.0rc1`. Mark these as prereleases in GitHub. The production workflow skips GitHub prereleases and rejects non-X.Y.Z versions even if a preview was accidentally marked stable. TestPyPI is available for trial publishing without changing the production index.
+Python prerelease versions use forms such as `2.1.0rc1`; a matching tag is `v2.1.0rc1`. Mark these as prereleases in GitHub. The production workflow skips GitHub prereleases and rejects non-X.Y.Z versions even if a preview was accidentally marked stable. TestPyPI is available for trial publishing without changing the production index.
 
 ## Workflows included
 
@@ -62,15 +62,15 @@ The first successful trusted publication creates the project. A pending publishe
 
 ```bash
 python -m pip install -r requirements.txt
-python -m pip install --index-url https://test.pypi.org/simple/ --no-deps 'mbmerge==1.1.0'
+python -m pip install --index-url https://test.pypi.org/simple/ --no-deps 'mbmerge==2.0.0'
 mbmerge --version
 ```
 
 3. Set the intended `VERSION` if changing it, commit all release files, and push. For the current version:
 
 ```bash
-git tag -a v1.1.0 -m "mbmerge 1.1.0"
-git push origin v1.1.0
+git tag -a v2.0.0 -m "mbmerge 2.0.0"
+git push origin v2.0.0
 ```
 
 4. On GitHub create and **publish** a Release for that existing tag. Use **Set as a pre-release** only for previews; those are skipped by production publishing. Write release notes describing changes and compatibility. The release workflow re-runs validation, requires the tag and built version to match, and uploads the wheel/sdist to PyPI after environment approval.
@@ -83,7 +83,7 @@ mbmerge --version
 
 For an existing pipx installation, use `pipx upgrade mbmerge`. GitHub automatically offers source archives for the tag; the built wheel and source distribution are also available in the workflow's `python-distributions` artifact and on PyPI. This workflow does not attach extra binary assets to the GitHub Release.
 
-TestPyPI versions are separate from PyPI, so testing `1.1.0` there does not consume `1.1.0` on production. On either index you cannot overwrite an already uploaded distribution file. Re-running a successful publishing job can fail for that reason; do not work around it with changed artifacts under the same version. A failed build/check before upload is safe to retry after fixing the cause.
+TestPyPI versions are separate from PyPI, so testing `2.0.0` there does not consume `2.0.0` on production. On either index you cannot overwrite an already uploaded distribution file. Re-running a successful publishing job can fail for that reason; do not work around it with changed artifacts under the same version. A failed build/check before upload is safe to retry after fixing the cause.
 
 ## Local verification before creating a release
 
@@ -94,7 +94,7 @@ python -m pip install '.[release]'
 python -m unittest discover -s tests -v
 python -m build
 python -m twine check --strict dist/*
-python tools/check_release.py --dist-dir dist --tag v1.1.0
+python tools/check_release.py --dist-dir dist --tag v2.0.0
 python -m pip install --force-reinstall --no-deps dist/*.whl
 python -I tools/smoke_installed.py
 ```
@@ -114,3 +114,9 @@ A normal `python -m build` uses an isolated build environment. `--no-isolation` 
 ## References
 
 [PyPA packaging guide](https://packaging.python.org/en/latest/tutorials/packaging-projects/), [PyPI Trusted Publishing](https://docs.pypi.org/trusted-publishers/using-a-publisher/), [publishing with GitHub Actions](https://packaging.python.org/en/latest/guides/publishing-package-distribution-releases-using-github-actions-ci-cd-workflows/), [TestPyPI](https://packaging.python.org/en/latest/guides/using-testpypi/), [Semantic Versioning](https://semver.org/).
+
+## Version 2 compatibility
+
+Version 2.0.0 changes new outputs to base-zoom merge followed by generated overviews and uses managed schema 3. Rebuild version 1.x outputs into new archives from original inputs. Explicit `--mode overlay` preserves the supplied-zoom workflow for new outputs. Both modes enforce lossless encoding, including transcoding unique lossy WebP. Release notes must describe this behavior and the new immutable zoom/mode settings.
+
+Enable variables must be **repository variables**, not variables inside the `pypi`/`testpypi` environment: the job-level condition runs before environment variables become available. If publishing was skipped for this reason, add the repository variable and re-run all jobs for the existing release; do not rewrite its tag or invent a new version before any upload occurred.

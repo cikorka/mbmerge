@@ -124,7 +124,7 @@ class PNGTests(unittest.TestCase):
         self.cli("--input", a, "--png-compress-level", "1")  # infers PNG output
         self.assertEqual(all_tiles(self.out), old)
 
-    def test_v1_webp_ledger_upgrades_and_accepts_new_png_source(self):
+    def test_legacy_ledger_is_refused_without_reinterpretation_or_file_changes(self):
         a, b = self.root / "a.mbtiles", self.root / "b.mbtiles"
         red, blue = image((240, 0, 0, 160)), image((0, 0, 240, 128))
         fixture(a, [(2, 0, 0, webp(red))], {"format": "webp"})
@@ -136,15 +136,15 @@ class PNGTests(unittest.TestCase):
             # merely lowering the version on a modern-format configuration.
             del settings["output_format"], settings["png_compress_level"]
             db.execute("UPDATE _merge_config SET version=1,settings=?", (json.dumps(settings),))
-        rejected = self.cli("--input", b, "--output-format", "png", check=False)
-        self.assertNotEqual(rejected.returncode, 0)
-        with sqlite3.connect(self.out) as db:
-            self.assertEqual(db.execute("SELECT version FROM _merge_config").fetchone()[0], 1)
-        self.cli("--input", b)
-        with sqlite3.connect(self.out) as db:
-            self.assertEqual(db.execute("SELECT version FROM _merge_config").fetchone()[0], 2)
-            self.assertEqual(dict(db.execute("SELECT * FROM metadata"))["format"], "webp")
-        self.pixels_equal(all_tiles(self.out)[(2, 0, 0)], Image.alpha_composite(red, blue))
+        for version in (1, 2):
+            with sqlite3.connect(self.out) as db:
+                db.execute("UPDATE _merge_config SET version=?", (version,))
+            before = self.out.read_bytes()
+            rejected = self.cli("--input", b, check=False)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("NEW output", rejected.stderr)
+            self.assertEqual(self.out.read_bytes(), before)
+            self.pixels_equal(all_tiles(self.out)[(2, 0, 0)], red)
 
     def test_unique_transcodes_reserve_output_bytes_and_enforce_blob_limit(self):
         a = self.root / "a.mbtiles"

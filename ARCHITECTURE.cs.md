@@ -2,109 +2,124 @@
 
 [English](ARCHITECTURE.md) | **Čeština**
 
-Tento dokument vysvětluje pravidla v [merge_mbtiles.py](merge_mbtiles.py). Podporované vstupy a příkazy popisuje [README](README.cs.md). Komentáře a docstringy ve zdrojovém kódu jsou anglicky.
+Verze 2 používá spravované schéma **3**. Výchozí `pyramid` importuje společnou základní úroveň a nižší zoomy vytváří ze společného detailu. Explicitní `overlay` importuje všechny dodané úrovně bez generování. Oba režimy sdílejí jediného writera a bezztrátové kódování.
 
 ## Mapa kódu
 
-| Oblast | Vstupní funkce | Odpovědnost |
-|---|---|---|
-| CLI | `parser`, `main` | Ověření limitů, signály, výběr příkazu a návratové kódy. |
-| Řízení běhu | `merge`, `collect_inputs`, `output_lock` | Pořadí zdrojů, vyloučení druhého writeru, kontrola historie a dokončení aktivního zdroje. |
-| Zdrojové snapshoty | `source`, `token`, `assert_static`, `digest`, `preflight` | Čtecí zámky, detekce změn a ověření všech historických příspěvků. |
-| Příprava databáze | `open_output`, `connection_limits` | Schéma, nastavení výstupu a omezení bufferů spojení. |
-| Příprava dávky | `read_batch`, `validate_schema` | Indexované stránkování a výběr podle délek před načtením blobů. |
-| Obrazové workery | `bounded_results`, `process_tile`, `decode`, `encode` | Backpressure, validace, kopírování, převod a skládání dlaždic. |
-| Trvalý stav | `import_source`, `update_metadata`, `_commit`, `checkpoint` | Společný commit pixelů a postupu, potom checkpoint WAL. |
-| Kontroly | `status`, `verify` | Malá evidence nebo výslovný průchod SQLite a obrázků výstupu. |
+| Funkce | Odpovědnost |
+|---|---|
+| `merge` | Zámek, kontrola historie, plán importů, obě fáze a dokončení |
+| `open_output` | Odmítnutí cizích/starých výstupů, schéma, pevná nastavení, WAL/cache |
+| `prepare_sources` | Kontrola skutečných maxim nebo explicitního společného zoomu před importem pixelů |
+| `source`, `digest`, `preflight` | Zamčené snapshoty, SHA-256 a neměnná historie |
+| `read_batch`, `import_source` | Bajtově omezené čtení, pořadí zdrojů a atomické kurzory |
+| `lossless_webp`, `process_tile` | Validace, bezpečná kopie, překódování ztrátového WebP a alfa compositing |
+| `mark_parents` | Deduplikované označení bezprostředních rodičů v transakci pixelů |
+| `read_overview_batch`, `build_pyramid` | Nejvyšší čekající zoom, omezené čtení potomků, atomická náhrada rodičů a propagace |
+| `process_overview` | TMS sestavení, přednásobení alfy, BOX zmenšení a bezztrátové kódování |
+| `bounded_results` | Společné spouštění workerů a backpressure |
+| `update_metadata` | Rozsahy/atribuce, indexovaná minima/maxima zoomů a fáze |
+| `status`, `verify` | Stav evidence, odmítnutí nedokončeného/tainted výstupu a dekódování |
 
-Úloha má tvar `(z, x, y, new_bytes, old_bytes_or_None)`, výsledek `(z, x, y, output_bytes)`. Souřadnice jsou všude TMS. Pořadí hodnot v Python n-ticích odpovídá sloupcům SQL; při změně je potřeba ověřit všechny producenty i konzumenty.
+## Pevný kontrakt
 
-## Jediný writer a pořadí zdrojů
+`_merge_config` ukládá režim, základní a minimální zoom, velikost dlaždice, formát, kompresi, pevný resampling `box-premultiplied-alpha` a `lossless=true`. Vynechané volby režimu/zoomů/formátu se převezmou. Název/popis/typ se mohou měnit.
 
-Hlavní proces vlastní zdrojové i jediné výstupní SQLite spojení. Workery vznikají přes `spawn` a dostávají pouze bajty a parametry. Nepředávej jim SQLite spojení a nepřepínej na `fork` s otevřenými spojeními.
+Základní úroveň vychází z indexovaných klíčů, ne deklarace maxzoom. Automatika vyžaduje shodná skutečná maxima neprázdných navržených vstupů; explicitní úroveň musí být v každém přítomná. Plán otevírá postupně jeden zdroj a drží jen malé deskriptory. Import úroveň znovu ověří ve vlastním zamčeném snapshotu. První zcela prázdná sada vyžaduje explicitní zoom. Ostatní dodané zoomy se v pyramidě ignorují.
 
-Paralelně běží jen dlaždice aktuálního zdroje. Jejich klíče jsou unikátní, takže pořadí dokončení workerů výsledek nemění. Pořadí zdrojů ho mění: `Image.alpha_composite(existing_output, new_source)` kreslí nový zdroj přes dosavadní obraz. Aktivní zdroj se musí dokončit před novým, i když ho další příkaz neuvede.
+Schémata 1/2 patří verzi 1.x. Odmítej je před změnou journal mode/dat. Již složené nižší zoomy nelze tiše reinterpretovat jako odvozenou pyramidu ani předpokládat jejich bezztrátovost. Nový výstup se staví z původních zdrojů. Starý archiv lze vědomě použít jako zploštěný zdroj; původní vrstvy se neobnoví.
 
-Výstupní zámek je kooperativní a drží se po celý běh. Jeho soubor zůstává po uvolnění na disku; smazání drženého zámku by umožnilo druhému procesu zamknout jiný inode. Přímé změny výstupu jinými nástroji nejsou podporované.
+## Writer a pořadí
 
-## Stav importu a obnova po pádu
+SQLite spojení vlastní jen rodič. Workery vznikají přes `spawn`; nepředávej spojení ani nepoužívej fork s otevřeným spojením. Základní úloha je `(z,x,y,new_bytes,old_bytes_or_None)`, přehled `(z,x,y,(SW,SE,NW,NE))`, kde potomek může být `None`. Výsledek je `(z,x,y,encoded_bytes)`.
 
-```mermaid
-stateDiagram-v2
-    [*] --> active: Registrace cesty a fingerprintu
-    active --> active: Commit dávky a posledního klíče
-    active --> complete: Ověření finálního SHA-256
-    active --> tainted: Změna zdroje během importu
-```
+Dokonči jeden zdroj před dalším: source-over závisí na pořadí a opakovaná potvrzená poloprůhledná vrstva mění obraz. Uvnitř zdroje jsou klíče unikátní, takže pořadí dokončení workerů nevadí. Po dokončení všech navržených zdrojů se vytvářejí rodiče; i jejich dávka má unikátní klíče.
 
-`active` bez posledního klíče znamená, že se nepotvrdila žádná dávka dlaždic. `complete` znamená úspěšnou finální kontrolu hashe. `tainted` blokuje další import a vyžaduje nový výstup; smazání příznaku neopraví pixely načtené z nestabilního zdroje.
+Různí rodiče mohou běžet paralelně. Rodič se však nesmí počítat před potvrzením všech čekajících potomků o úroveň výše. Nejvyšší klíč `_merge_dirty` a indexovaný prefix daného zoomu tuto bariéru udržují i při přerušené tvorbě nebo přidání zdrojů.
 
-Neshoda SHA při preflightu je odlišná: import ještě nezačal, takže výstup neoznačí jako tainted. Obnovení přesných původních bajtů umožní pokračovat.
-
-Dávka má následující průběh:
-
-1. Načíst klíče a délky pomocí `(z,x,y) > last_committed_key`, bez `OFFSET`.
-2. Najít překryvy malou dočasnou tabulkou a indexovaným vyhledáváním ve výstupu.
-3. Vybrat souvislý prefix podle počtu a bajtového rozpočtu; načíst jen jeho bloby.
-4. Zahájit `BEGIN IMMEDIATE`, spustit omezené úlohy a zapisovat výsledky SQL dávkami.
-5. Znovu ověřit stabilitu zdroje. Aktualizovat poslední klíč, počty, zoomy, rozsahy a metadata.
-6. Potvrdit **všechny** tyto změny společně. Potom mimo transakci zavolat `wal_checkpoint(TRUNCATE)`.
-
-Pád před commitem vrátí celou dávku; po commitu se dávka přeskočí. Opakované nanesení potvrzené poloprůhledné vrstvy by změnilo pixely. Retry proto nesmí takovou dávku znovu skládat. Pokud checkpoint blokuje čtečka, předchozí dávka již zůstala potvrzená. Import zastaví a naváže po zavření čtečky.
-
-Registrace a dokončení zdroje jsou samostatné malé transakce. Trvale uložený poslední klíč označuje potvrzené dlaždice, nikoli odeslané nebo právě dokončené úlohy. Chyba SQL/workeru vrátí aktuální dávku a ponechá starší commity.
-
-## Účtování paměti
-
-`read_batch` počítá zdrojové bajty, staré bajty výstupu a rezervu výsledku. Překryv nebo možný převod formátu rezervuje `max_tile_mib`. Jedinečná dlaždice deklarovaná ve formátu výstupu může rezervovat původní velikost: worker deklaraci ověří před kopírováním. Při změně rychlé kopírovací větve toto ověření zachovej.
-
-`batch_size` omezuje režii klíčů a řádků, `batch_mib` kódovaná data. Čtení délek před bloby brání načtení příliš velké dlaždice ještě před odmítnutím. Pevné pořadí joinu brání plnému průchodu výstupu pro každou dávku.
-
-`bounded_results` odešle nejvýše `max_inflight` futures včetně hotových neodebraných výsledků. Výsledky předá před doplněním poolu, takže pomalý SQL writer zpomalí producenty. Nenahrazuj ho načtením všech úloh přes `map`, neomezenou frontou ani seznamem všech výsledků. SQL buffery mají také početní a bajtový limit; před další dávkou se stará uvolní.
-
-Rozpočty nejsou tvrdým limitem RSS. Přidávají se kopie při serializaci, procesy Python/Pillow, dekódované RGBA buffery, metadata PNG a paměť nativních kodeků. Rozměry a bloby jsou omezené, SQLite cache mají limit, mmap je vypnutý a dočasné tabulky mohou přetéct na disk. Absolutní celkový limit nastavuje provozní prostředí.
-
-## Integrita zdrojů a formáty
-
-Čtecí transakce zdroje zahrnuje první hash, import i poslední hash. Po `BEGIN` se čte schéma, aby se skutečně získal sdílený zámek. WAL zdroje se odmítají, protože samotný hlavní soubor nemusí obsahovat celý jejich viditelný stav. `immutable=1` není bezpečná optimalizace: obchází potřebné zamykání.
-
-Stat tokeny zachytí výměnu zařízení/inodu a změnu velikosti, mtime či ctime. ctime se může změnit i při změně metadat, což záměrně vede ke konzervativnímu zastavení. SHA-256 ověřuje obsah i při obnovení velikosti/mtime. Vstupy musí být offline a neměnné; přímé zápisy obcházející SQLite zámky nejsou podporované.
-
-Signatury a hlavičky se ověřují před alokací pixelů v Pillow. WebP kontroluje VP8X i rozměry VP8/VP8L, PNG hlavičku IHDR, hranice/CRC chunků a statický obraz. Pillow potom dekóduje podporovaný 8bitový zobrazovací rastr do RGBA. 16bitové PNG a animace se výslovně odmítají. Merger nemění velikost dlaždic, nespravuje barevné profily, nereprojektuje ani neořezává polygonem.
-
-Jedinečná dlaždice se kopíruje bajtově jen při shodě s formátem výstupu. Ostatní se převádějí; překryvy se skládají a bezztrátově kódují. Již ztracené pixely původního ztrátového vstupu nelze obnovit. Nastavení komprese platí pro nově kódované dlaždice, nikoli původní kopírované bajty.
-
-## Evidence, metadata a kompatibilita
+## Trvalý stav
 
 | Tabulka | Význam |
 |---|---|
-| `tiles` | Standardní souřadnice MBTiles a jeden zvolený formát obrázků. |
-| `metadata` | Zobrazovací metadata aktualizovaná s potvrzenými pixely. |
-| `_merge_sources` | Pořadí, cesta/hash/stat token, stav, poslední klíč a průběžné statistiky zdroje. |
-| `_merge_config` | Verze schématu a nastavení výstupu/kodéru. |
-| `_merge_attributions` | Unikátní atribuce s omezenou souhrnnou velikostí. |
+| `tiles`, `metadata` | Standardní MBTiles obrázky a zobrazovací metadata |
+| `_merge_config` | Schéma a pevný kontrakt |
+| `_merge_sources` | Priorita, absolutní cesta, hash, stat token, active/complete/tainted, potvrzený kurzor a statistiky |
+| `_merge_attributions` | Deduplikované celé texty atribucí |
+| `_merge_dirty` | Disková množina čekajících rodičů `(z,x,y)` s primárním klíčem |
+| `_merge_state` | Globální fáze a kumulativní počet potvrzených zápisů přehledů |
 
-`tile_count` počítá příspěvky zdrojů, nikoli unikátní výstupní dlaždice. Zoomy vycházejí z potvrzených klíčů. Bounds používají validní deklaraci nebo celé importované dlaždice, bez ořezu podle alfa kanálu. Celková metadata agregují malou evidenci a neprocházejí stále celou tabulku dlaždic. Deklarovaný rozsah rozpracovaného zdroje může zahrnovat dosud nenačtené části.
+Fáze:
 
-`VERSION` programu a `SCHEMA_VERSION` mají odlišný účel. Verze 1.1 interpretuje schéma 1 jako WebP a trvale ho povýší na 2 při nejbližším úspěšném commitu dávky nebo finálních metadat. Verze 1.0 schéma 2 odmítne, aby nepoškodila PNG výstup původním WebP kódem. Formát, velikost dlaždic a aktivní kompresní parametr jsou při resume pevné.
+```mermaid
+stateDiagram-v2
+    [*] --> empty
+    empty --> importing: registrace zdroje
+    importing --> importing: commit zdrojové dávky
+    importing --> building: dokončené zdroje
+    building --> building: commit rodičů a dalších předků
+    building --> complete: žádní čekající rodiče
+    complete --> importing: přidání vstupu
+    building --> importing: přidání po přerušené tvorbě
+```
 
-U nekompatibilní změny nejdřív stanov migraci a chování starších klientů. Tato nastavení se během života archivu nesmějí tiše přepnout.
+Overlay přechází z importu přímo do complete. Dokončený zdroj může být součástí nedokončené pyramidy. Změna zdroje během jeho importu vede na tainted a blokuje další práci. Samotná neshoda hashe při preflightu předchozí pixely neoznačí jako tainted.
 
-## Testy a bezpečné rozšiřování
+## Atomické hranice a obnova
 
-- [tests/test_merge.py](tests/test_merge.py) ověřuje pořadí, metadata, zámky, detekci změn, rollback a skutečný SIGKILL kolem commitu pro oba formáty.
-- [tests/test_png.py](tests/test_png.py) ověřuje smíšené formáty, pixely, strukturu/režimy PNG, velikost výsledků, jednotný formát a migraci evidence.
-- [examples/create_demo.py](examples/create_demo.py) vytváří nezávislé 512px vstupy a očekávaný obraz přímo přes Pillow.
-- [tests/benchmark_memory.py](tests/benchmark_memory.py) měří strom procesů CLI, bez přípravy dat a měřicího procesu. Vzorkuje RSS, takže může započítat sdílené stránky vícekrát a minout krátké špičky.
+Základní dávka:
 
-Před změnou dávkování, pořadí, kódování nebo schématu spusť `python -m unittest discover -s tests -v`. Zachovej pixelové porovnání, kontrolu přeskočení potvrzené dávky, rezervu výsledku převodu a crash testy. Změna toku dat či spotřeby prostředků vyžaduje nové měření na reprezentativních datech; samotné komentáře nové výkonnostní měření nepotřebují. Při přípravě release archivu po poslední změně všech souborů přegeneruj `SHA256SUMS`.
+1. Indexovaně načti klíče/délky, zjisti staré délky přes malou dočasnou tabulku, zvol souvislý prefix podle bajtů a načti jen jeho bloby.
+2. Zahaj transakci, odešli omezené úlohy a zapisuj omezenými SQL buffery.
+3. Znovu ověř stabilitu zdroje, uprav kurzor/počty/rozsahy, vlož bezprostřední rodiče a metadata.
+4. Potvrď společně a proveď checkpoint.
 
-Kód i související projektová dokumentace jsou zveřejněny pod [licencí MIT](LICENSE.md).
+Chyba neposune pixely, kurzor ani rodiče. Potvrzená dávka se neopakuje. Registrace a dokončení jsou malé samostatné transakce, dokončení až po závěrečném hashi.
 
-## Balíčkování a vydávání
+Přehledová dávka:
 
-[mbmerge.py](mbmerge.py) zpřístupňuje `python -m mbmerge` a `__version__`. Nainstalovaný příkaz používá stejný `main()` v `merge_mbtiles.py`; původní skript zůstává kompatibilní. [pyproject.toml](pyproject.toml) balí výslovně tyto dva moduly, dynamicky načítá VERSION a přebírá závislost Pillow z requirements.txt.
+1. Vyber nejvyšší čekající zoom a omezený prefix rodičů. Vytvoř nejvýše čtyři klíče potomků na rodiče.
+2. Přečti délky přes primární klíč, zvol bajtově omezený prefix a načti jen jeho bloby. Chybějící potomci jsou průhlední.
+3. V transakci sestav aktuální potomky a nahraď rodiče. Původní obraz rodiče nikdy nevstupuje do výpočtu.
+4. Vlož další předky, odstraň právě hotové čekající klíče, zvyš počet zápisů, uprav metadata a společně potvrď. Následuje checkpoint.
 
-[MANIFEST.in](MANIFEST.in) přidává zdrojové testy/dokumentaci a jen čtyři jmenované syntetické databáze, nikdy obecný glob všech MBTiles. [tools/check_release.py](tools/check_release.py) ověřuje identitu zdrojů, wheelu, sdistu a produkční tag. [tools/smoke_installed.py](tools/smoke_installed.py) záměrně používá nainstalovaný wheel, izolovaný Python a dočasný pracovní adresář CLI.
+Pád před commitem ponechá rodiče čekající. Pád po commitu zachová pixely i další předky. Nové základní pixely mohou rozšířit přerušenou tvorbu: klíče se deduplikují a pořadí od nejvyššího zoomu opraví potomky před jejich rodiči. Pád po posledním rodiči před finálním dokončením ponechá building s prázdnou frontou; resume bezpečně nastaví complete.
 
-[RELEASING.cs.md](RELEASING.cs.md) popisuje znovupoužitelné CI a oddělené publikační joby s OIDC. Při změně balíčkování či vstupních bodů znovu sestav a vyzkoušej wheel i wheel ze sdistu; samotné zdrojové testy chybějící soubory distribuce neodhalí.
+Publikovatelný je pouze complete. Během běhu mohou čtenáři vidět nový detail se starými/chybějícími přehledy. Stav ukazují metadata a status, verify nedokončený výstup odmítne. Cizí prohlížeč vlastní metadata může ignorovat; provozovatel publikuje až zavřený dokončený archiv.
+
+## Obrazové operace
+
+`decode` před alokací Pillow kontroluje PNG/WebP strukturu, signaturu, rozměry a délky. Statické osmibitové zobrazovací rastry se převádějí do RGBA. Animace a 16bitové zdroje se odmítají; barevné profily se netransformují. Mřížka/CRS musí odpovídat předem.
+
+`process_tile` ověří každou importovanou dlaždici. Jedinečné shodné PNG se kopíruje; WebP jen tehdy, pokud validované RIFF chunky obsahují bezztrátové VP8L RGB. Ztrátové VP8 se i bez překryvu bezztrátově překóduje. Zachovají se dekódované pixely, nikoli původně ztracený detail. Překryvy používají `Image.alpha_composite(existing,new)`.
+
+`process_overview` vloží potomky do RGBA plátna `2S × 2S`. TMS dy=1 je sever a má obrazové y=0; dy=0 má y=S. Následuje přednásobené `RGBa`, BOX zmenšení dvakrát, převod do RGBA a kódování. BOX nepotřebuje okolí mimo čtyři potomky. Filtr s větším dosahem by vyžadoval okolní pixely a nové testy švů; nestačí vyměnit konstantu filtru.
+
+PNG má uloženou úroveň komprese, WebP `lossless=True, exact=True`. Původní bezztrátové shodné bajty mohou mít vlastní kompresní úsilí. Bezztrátové kódování neodstraní zaokrouhlování osmibitového výpočtu. `verify --decode` odmítne zvenku vložené ztrátové WebP.
+
+## Účtování paměti
+
+Omezuje se počet i kódované bajty. Základní úloha rezervuje zdroj, starý výstup a maximální výsledek. Jen jedinečné deklarované shodné PNG může před čtením rezervovat svou původní délku; deklarace WebP neznamená kopii. Přehled rezervuje až čtyři potomky a jeden maximální výsledek. Pyramida vyžaduje nejméně `5 × max_tile_mib`, overlay trojnásobek.
+
+Dočasné tabulky a Python deskriptory jsou omezené batch_size, pro potomky čtyřnásobně. `_merge_dirty` je trvalý diskový stav. Primární klíč tiles začíná zoomem, takže min/max i čtení úrovně používají index. Nenahrazuj je GROUP BY nad celým výstupem ani neomezeným čtením blobů.
+
+`bounded_results` omezuje všechny pending/hotové-neodebrané futures na max_inflight. Výsledky předává před doplněním a při chybě čekající úlohy ruší. SQL buffery mají limit počtu/bajtů. Starou dávku uvolni před další. Chyba workeru vrací výstupní transakci; restart určují kurzory a čekající rodiče.
+
+Rozpočty nejsou tvrdé RSS. Přidávají se kopie při serializaci, procesy Python/Pillow, dekódované obrázky, větší přehledové plátno a nativní kodéry. Seznam cest/deskriptory rostou s počtem souborů; obrazové buffery nerostou s celkovým počtem dlaždic. Cache jsou explicitní, mmap vypnutý, dočasná data mohou přetéct na disk. Tvrdý limit poskytuje OS.
+
+## Hashování, metadata a disk
+
+Vstup drží čtecí transakci během počátečního hashe, importu i závěrečného hashe. Po BEGIN ihned čti schéma kvůli sdílenému zámku; nepoužívej immutable=1. WAL vstupy se odmítají, protože hash hlavního souboru neobsahuje WAL. Na hranicích se kontroluje zařízení/inode/velikost/mtime/ctime a živé journaly.
+
+Každé spuštění hashuje celou historii. Zachytí změny se zachovanými stat údaji, ale samostatné spuštění pro každý soubor je drahé. Pro počáteční sadu použij jeden seznam. Obsahová verifikace se tiše nenahrazuje stat-only cache.
+
+Bounds agregují malou evidenci zdrojů, podle deklarací nebo základních dlaždic. Přehledové dlaždice nesmějí rozšířit geografické bounds. Skutečné zoomy se získají indexovaným krajním vyhledáním. Fáze/metadata patří do transakce pixelů. Atribuce má samostatný limit.
+
+WAL používá FULL synchronizaci a explicitní TRUNCATE checkpointy. Blokující čtenář práci zastaví; poslední transakce již může být potvrzená a nesmí se opakovat. Soubor zámku zůstává po skončení; smazání drženého souboru by umožnilo druhý zámek na jiném inode. Vyžaduj lokální SQLite disk a místo pro čekající klíče, WAL, indexy i výstup.
+
+## Ověření a balíčkování
+
+`test_merge.py` zachovává pořadí, bezpečnost a zdrojové crash testy. `test_png.py` pokrývá formáty, validaci a odmítnutí starých evidencí. `test_pyramid.py` ověřuje obrazové příklady, TMS, sloučení před zmenšením, selektivní přepočet, bezztrátový převod, společný zoom a skutečný SIGKILL v obou fázích/formátech. `benchmark_pyramid.py` ověřuje tisíce archivů, počet deduplikovaných předků a RSS. `benchmark_memory.py` zpracovává větší zdrojové objemy.
+
+Veřejný modul/příkaz volají `merge_mbtiles.main`; VERSION zůstává jedním literálem. `check_release.py` ověřuje obsah/identitu archivů a shodu tagu, `smoke_installed.py` nainstalované i ze sdistu přestavěné wheely mimo checkout, reálné workery, oba kodéry a celou pyramidu. MANIFEST obsahuje jen čtyři jmenované syntetické MBTiles, nikdy obecný glob dat.
+
+Po změně pořadí, schématu, kódování nebo dávkování spusť celou sadu. Po změně bufferů změř paměť. Udržuj EN/CS dokumentaci a po finálních úpravách přegeneruj SHA256SUMS sledovaných souborů. Publikování řeší [RELEASING.cs.md](RELEASING.cs.md). Komentáře/docstringy jsou anglické, zdroje mají MIT SPDX hlavičky.

@@ -1,82 +1,51 @@
-# Protokol ověření – 31. 10. 2026
+# Zpráva o ověření — 2026-11-01
 
 [English](TEST_REPORT.md) | **Čeština**
 
-`merge_mbtiles.py`, verze 1.1.0, byl ověřen na macOS ARM64, Python 3.12.14, SQLite 3.53.1, Pillow 12.3.0, libwebp 1.6.0. Jde o syntetické testy. Reálná vstupní sada o velikosti 1 TB ani úplný import tisíců zdrojových archivů nebyly otestovány; produkční nasazení musí předcházet pilot na vlastních datech.
+Zpráva se týká **mbmerge 2.0.0 / schéma 3**, včetně sloučení základní úrovně a následné tvorby nižších zoomů. Místní prostředí: macOS ARM64, Python 3.12.14, SQLite 3.53.1, Pillow 12.3.0, libwebp 1.6.0. Test nainstalované distribuce používá také Pillow 13.0.0. Vstupy jsou syntetické; reálná 1TB kolekce nebyla otestována.
 
-## Automatické testy
+## Správnost a obnova
 
-Příkaz `python -m unittest discover -s tests -v`: **22 testů, OK**. Výstup a dobu posledního běhu obsahuje [TEST_RESULTS.txt](TEST_RESULTS.txt).
+Celá místní sada prošla: **30 testů**. Výstup a délku obsahuje [TEST_RESULTS.txt](TEST_RESULTS.txt). Zahrnuje **16 skutečných SIGKILL scénářů**: čtyři pro zdrojové transakce overlay a dvanáct pro import, průběžné přehledy a poslední přehled pyramidy, před/po commitu, pro PNG i WebP.
 
-Ověřené scénáře:
+Ověřené vlastnosti:
 
-1. Částečně průhledné překryvy, priorita pozdější vrstvy, průhledná místa, pixelová shoda s Pillow alpha_composite, nezměněné bajty nepřekrytých dlaždic, TMS row beze změny, bounds/center/zoomy/atribuce, inkrementální přidání a přeskočení hotových vstupů.
-2. Fallback bounds z jižních TMS řádků, odmítnutí NaN bounds, konzervativní antimeridián.
-3. Změna zdrojového obsahu při stejné délce a obnoveném mtime: SHA-256 odmítne import ještě před přidáním nové vrstvy; ověřuje i zdroj vynechaný z nového příkazu. Obnovení přesných původních bajtů umožní pokračování.
-4. Poškozené WebP, jiné rozměry, nevalidní TMS klíč, chybějící unikátní index a explicitní XYZ: chyba a žádné nové pixely.
-5. Bajtový rozpočet omezuje dávku i při malých vysoce komprimovaných vstupech. `peak_inflight <= 2`, `peak_batch_bytes <= 3 MiB` při testovacím nastavení.
-6. Chyba workeru poté, co část SQL dávky už byla zapsána: rollback všech jejích pixelů i checkpointu.
-7. Dlouhý externí WAL reader: checkpoint se neprovede, import zastaví po registraci zdroje; po zavření readeru pokračuje bez opakovaného compositingu.
-8. Příliš velký BLOB se odmítá podle délky před načtením obsahu. Podvržené obří WebP rozměry se odmítnou před dekódováním.
-9. Odmítnutí vstupu totožného s výstupem, nepřevzetí neřízené DB, vzájemné vyloučení dvou instancí CLI.
-10. Odmítnutí vstupního WAL režimu.
-11. Simulovaná nečekaná změna zdroje během importu: trvalý stav `tainted` a odmítnutí dalšího běhu.
-12. `EXPLAIN QUERY PLAN`: keyset čtení používá index bez dočasného třídění, output join vyhledává v indexu výstupu.
-13. Pořadí seznamu, abecední pořadí adresáře, prázdné zdroje.
-14. Skutečné násilné ukončení skupiny procesů pomocí SIGKILL pro PNG i WebP výstup s PNG zdrojem, před commitem a po commitu, před checkpointem WAL: SQLite integrity_check OK. Před commitem evidovány 2 dlaždice, po commitu 4; obnovení dokončí aktivní zdroj před novou vrstvou. Oba výsledky jsou po resume **bajtově shodné** s nepřerušeným během. Opakovaný import hotového poloprůhledného zdroje výstup nezmění.
+- Výchozí pyramida importuje skutečný společný nejvyšší zoom, ignoruje dodané přehledy a generuje rodiče až po základním importu. Asymetrické barvy kontrolují TMS orientaci. Chybějící potomci jsou průhlední, bounds se neroztáhnou na celé přehledové dlaždice.
+- Střídavé neprůhledné červené/modré pixely z různých zdrojů se nejprve sloučí a potom zmenší do neprůhledné fialové. Test odhaluje nesprávné zmenšení zdrojů před jejich skládáním. Neviditelná zelená se nepřenese do červeného alfa okraje.
+- Jedinečné ztrátové WebP se v obou režimech převede na bezztrátové VP8L se zachováním dekódovaných pixelů. Smíšené zdroje mají jednotný výstup. Verify odhalí zvenku vložené ztrátové WebP nebo chybný formát.
+- Rozdílná maxima, chybějící základ a neplatný rozsah zoomů se bezpečně odmítnou. Prázdný odmítnutý plán lze opravit bez smazání výstupu. Režim/zoomy/formát po importu nelze tiše změnit. Staré schéma 1/2 se odmítne bez změny bajtů.
+- Přidání přepočítá pouze dotčené předky. Nedotčené větve zachovají bloby; inkrementální výsledek se shoduje s novým sestavením. Opakovaný import hotových zdrojů nic nepřekreslí ani nevytvoří další rodiče.
+- Integrační test 96 zdrojů se společným dodaným z=1 importuje pouze z=8. Počet rodičů odpovídá nezávislé množině předků, bajty a úlohy nepřekročí limity.
+- Skutečné SIGKILL zachová integritu SQLite, správné kurzory a trvalé plánování. Verify odmítne nedokončený stav; resume dokončí aktivní vynechaný zdroj před novým. Obnovené bloby odpovídají nepřerušenému sestavení i po posledním commitu rodiče před finální změnou fáze.
+- Původní bezpečnostní testy nadále ověřují pořadí/alfu/metadata, hash při obnovené velikosti/mtime, poškozené obrázky a rozměry před dekodérem, PNG, SQL rollback, blokovaný checkpoint, zámek writera, taint, pořadí vstupů a indexované plány. Test pozdní dávky nad 10 000 klíči měří skutečnou práci SQLite VM a brání opakovanému skenování předchozích základních dlaždic.
 
-Test změny během importu je řízená injekce `SourceChanged`, nikoli závod s neřízeným přepisem SQLite souboru. SIGKILL scénáře skutečně ukončují procesy. Fyzický výpadek napájení ani chování konkrétního disku při fsync se netestovaly.
+Simulace změny zdroje ověřuje reakci evidence, ne všechny možné souběžné raw-file zápisy. SIGKILL je skutečný. Fyzický výpadek napájení, vadná synchronizace disků a všechny limity OS/hardwaru testovány nebyly.
 
-## PNG/WebP testy doplněné ve verzi 1.1
+## Mnoho souborů, 512px a paměť
 
-Osm dalších testů ověřuje:
+Každý soubor má jedinečnou základní PNG dlaždici z=14 a dodanou dlaždici z=1 společnou všem. Výchozí pipeline musí z=1 ignorovat a vytvořit každého potřebného předka jednou. Čtyři workery, max-inflight 8, rozpočet dávky 32 MiB, maximum blobu 4 MiB a výchozí komprese. Každý běh začíná novým výstupem.
 
-1. PNG překryvy, zachování původních bajtů jedinečné PNG dlaždice, `metadata.format=png` a dekódování výstupu.
-2. Smíšené WebP/PNG vstupy do obou výstupních formátů: přesné RGBA pixely, jednotný formát všech výsledných dlaždic, zachování bajtů tam, kde to jde, a opakování bez změny výsledku.
-3. Rozpoznání signatur při chybějícím formátu v metadatech, paletovou průhlednost, odstíny šedi, šedá+alfa a RGB.
-4. Rozměry PNG před `Image.open`, vadné CRC chunků, odmítnutí APNG, explicitní odmítnutí 16bitového PNG a nesoulad deklarace formátu.
-5. Pevný formát výstupu a aktivní kompresní parametr při resume; formát PNG se bez přepínače načte z existujícího výstupu.
-6. Migraci WebP evidence schématu 1 na 2 při přidání PNG zdroje; pokus o změnu formátu výstupu se odmítne.
-7. Rezervu na největší výstup i pro jedinečné převáděné dlaždice, omezení úloh a bajtů dávky a maximální velikost zakódovaného výstupu.
-8. Odmítnutí nesprávně zakódované dlaždice při kontrole výstupu.
+| Výstup | Zdroje | Základní dlaždice | Vytvoření rodiče | Čas (s) | RSS stromu (MiB) | Maximum úloh | Maximum bajtů dávky |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| webp | 128 | 128 | 134 | 9.473 | 269.3 | 7 | 29361724 |
+| webp | 7000 | 7000 | 2382 | 554.466 | 262.81 | 7 | 29363178 |
+| png | 128 | 128 | 134 | 20.771 | 217.91 | 7 | 29391138 |
+| png | 7000 | 7000 | 2382 | 451.234 | 267.59 | 7 | 29422904 |
 
-Původní publikované CLI 1.0 bylo navíc ručně spuštěno nad PNG výstupem schématu 2 a správně ho odmítlo. Migrace mění verzi evidence; po úspěšném převodu používej verzi 1.1+.
+Všechny čtyři běhy prošly plnou kontrolou SQLite a dekódováním všech dlaždic. Klíče odpovídaly nezávislé množině základů/předků. Příspěvků bylo právě tolik jako zdrojů, čekajících rodičů nula a fáze complete. Oba běhy se 7000 soubory vytvořily **jedinou dlaždici z=1**, místo skládání 7000 dodaných přehledů. Počet generovaných přehledů odpovídal množině unikátních předků.
 
-## Zátěž a RAM
+Raw velikosti, verze, procesy a výsledky obsahuje [BENCHMARK.json](BENCHMARK.json). Obrazy jsou jednoduché a opakované, soubory malé; nejde o 1 TB složitých map. Testuje se plán tisíců souborů, evidence, commity, diskoví rodiče, skutečné 512px kodeky a společný nízký zoom. Časy nelze přepočítávat na TB provoz.
 
-Verze 1.1.0 byla změřena příkazem `python tests/benchmark_memory.py --tiles 64 512 --work-dir <temporary-directory>` a znovu s `--output-format png`.
+RSS se vzorkuje asi po 100 ms přes ps jako součet rodiče CLI, workerů a resource trackeru. Nezahrnuje měřicí skript, přípravu dat, závěrečnou verifikaci ani filesystem cache. Sdílené stránky mohou být započtené vícekrát a krátká špička může uniknout. Oba kodéry a některé vývojové kontroly na hostiteli běžely souběžně; časy nejsou izolované rychlostní porovnání. Každý strom CLI se měří samostatně. Nejde o tvrdý RSS limit.
 
-Oba vstupy obsahují 512 × 512px bezztrátové RGBA WebP s deterministickým náhodným barevným obsahem a průhledností, se všemi souřadnicemi v překryvu. PNG běhy tedy ověřují i převod formátu. Čtyři workery, nejvýše osm odeslaných úloh, 32 MiB rozpočet dávky, 4 MiB limit blobu a ostatní výchozí hodnoty. Každý běh začíná novým výstupem. Záhlaví sloupců určuje výstupní formát a počet dlaždic na zdroj.
+První pokus ve workspace zastavila změna fingerprintu vstupu před dokončením. Nepočítá se jako úspěšné měření. Generátory nyní explicitně zavírají SQLite spojení (samotný context manager pouze commituje), finální běhy používají dočasný adresář. Přesná příčina původní události nebyla určena; integritní kontroly se neoslabovaly ani neobcházely. Chyba nyní uvádí, která stat pole se změnila.
 
-| Metrika | WEBP · 64 | WEBP · 512 | PNG · 64 | PNG · 512 |
-|---|---:|---:|---:|---:|
-| Dlaždic na zdroj | 64 | 512 | 64 | 512 |
-| Příspěvků obou zdrojů | 128 | 1024 | 128 | 1024 |
-| Součet vstupních DB (B) | 101228544 | 809558016 | 101228544 | 809558016 |
-| Výstupní DB (B) | 51412992 | 405577728 | 58437632 | 460922880 |
-| Celkový čas včetně měření (s) | 4.14 | 33.246 | 5.087 | 30.231 |
-| Špička součtu RSS (MiB) | 423.67 | 390.14 | 313.25 | 321.27 |
-| Současných procesů | 6 | 6 | 6 | 6 |
-| Maximum odeslaných úloh | 8 | 8 | 6 | 6 |
-| Maximum rozpočtu dávky (B) | 33130860 | 33130860 | 29898804 | 29898804 |
-| Potvrzených datových dávek | 17 | 128 | 24 | 189 |
+## Distribuce a dokumentace
 
-RSS se vzorkuje přibližně po 100 ms pomocí `ps` jako součet hlavního procesu, workerů a resource trackeru. Sdílené stránky se mohou započíst vícekrát. Jde o praktické vzorkované měření, nikoli přesný součet soukromých alokací. Nezahrnuje cache filesystemu OS, může minout krátké špičky a není pevným limitem RSS. U větších běhů nevzrostla paměť úměrně osminásobku vstupních dat; kolísání běhu a vzorkování může způsobit i vyšší naměřenou špičku u menšího běhu. Surová data a verze prostředí jsou v [BENCHMARK.json](BENCHMARK.json). Propustnost závisí na datech, překryvech, disku, cache a kompresi; výsledky nepředpovídají čas pro 1 TB.
+Wheel/sdist prošly strict Twine a kontrolou identity/obsahu/tagu v2.0.0. Chybný tag se odmítá. Přímý wheel i wheel znovu sestavený ze sdistu prošly izolovaným testem instalovaného CLI mimo checkout: skutečné workery, smíšené 512px vstupy, oba bezztrátové kodéry, celá pyramida, přesné základní pixely, TMS, metadata, replay a dekódování. Místně byly ověřeny EN/CS odkazy a obrázky README.
 
-## Demo a obrázky v README
+Výsledky GitHub-hosted CI jsou v Actions kontrolách větve/PR. Místní výsledky netvrdí dostupnost všech podporovaných runnerů na tomto stroji. Validace nevytváří release tag, GitHub Release ani upload na PyPI/TestPyPI.
 
-Z přibalených PNG vstupů v `demo/png/` byly vytvořeny dočasné PNG i WebP výstupy. Úspěšný `verify --full-sqlite-check --decode`: 1 dekódovaná výsledná dlaždice, 0 nedokončených zdrojů. Oba výstupy mají RGBA pixely přesně shodné s `demo/png/expected_overlap.png`; opakovaný běh přeskočí oba evidované zdroje. Výstup se nepublikuje, protože jeho evidence obsahuje místní absolutní cesty; podle [README](README.cs.md) si vytvoř vlastní.
+## Provozní omezení
 
-[Obrázek skládání](docs/images/compositing.png) je vytvořen ze skutečných náhledů dema a očekávaného výsledku. [Schéma dlaždic](docs/images/tile-grid.png) ukazuje jedinečné i společné souřadnice: části se stejným `z/x/y` se složí do jedné dlaždice, různé souřadnice zůstanou samostatné. Obrázky lze znovu vytvořit pomocí `examples/create_readme_images.py`.
-
-## Provozní hranice
-
-Změněné dříve importované vrstvy se odmítají, nepřegenerovávají. Zdrojové soubory musí zůstat dostupné na stejných cestách. Bounds se neořezávají podle alfa kanálu. Pevný celkový limit RAM nastavuje provozní prostředí, CLI zajišťuje omezené datové dávky/fronty/cache/rozměry. Dokumentace obsahuje postup pilotu a nastavení s menší pamětí. Automatické testy jsou spustitelné z přibalených zdrojů bez reálných dat.
-
-## Příprava balíčkování a GitHub Actions
-
-Balíček, repozitář i příkaz se nově jmenují `mbmerge`. VERSION zůstává 1.1.0, chování merge se nemění. Všech 22 testů prošlo na Pythonu 3.12 s Pillow 12.3.0 a znovu s Pillow 13.0.0; oba běhy jsou v [TEST_RESULTS.txt](TEST_RESULTS.txt).
-
-Wheel i sdist prošly `twine check --strict` a kontrolou identity/obsahu distribucí. Přímá instalace wheelu i izolované nové sestavení ze sdistu prošly smoke testem nainstalovaného CLI mimo checkout: skutečné workery, smíšené PNG/WebP, přesné pixely překryvu, jednotný formát, původní bajty jedinečných dlaždic ve shodném formátu, metadata, opakování a plná kontrola výstupu. Záměrně chybný tag i náhledová verze určená pro produkci byly odmítnuty. Kontrolní soubory představující místní výstupy a `.env` se do distribucí nedostaly.
-
-YAML workflow a podmínky publikování byly ověřeny lokálně. CI má nastavené Linux/macOS joby s Pythonem 3.11–3.14; skutečné GitHub Actions ani publikování PyPI/TestPyPI/OIDC zde spuštěny nebyly. Vlastník musí nastavit repozitář, účty, prostředí a Trusted Publisher podle [RELEASING.cs.md](RELEASING.cs.md). Žádný release ani balíček nebyl nahrán.
+Historické zdroje zůstávají neměnné a dostupné na evidovaných cestách. Každé spuštění je znovu hashuje; první velkou sadu importuj jedním příkazem. Nahrazování/odebírání vrstev, GDAL vstupy, reprojekce, polygonový clip, Windows a samostatné executably zůstávají mimo rozsah. Osmibitový výpočet zaokrouhluje; bezztrátový kodek neznamená bezztrátové zmenšování. Publikuj dokončené zavřené archivy, vyhni se dlouhým WAL čtenářům, používej lokální SQLite disk a absolutní limit paměti nastav OS. Před provozem ověř reprezentativní skutečná data.

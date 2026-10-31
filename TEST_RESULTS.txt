@@ -1,4 +1,4 @@
-Python 3.12.14 / Pillow 12.3.0
+mbmerge 2.0.0 — local Python 3.12 suite, Pillow 12.3.0
 
 test_alpha_priority_tms_metadata_and_incremental (test_merge.MergeTests.test_alpha_priority_tms_metadata_and_incremental) ... ok
 test_blocked_wal_checkpoint_stops_then_resumes (test_merge.MergeTests.test_blocked_wal_checkpoint_stops_then_resumes) ... ok
@@ -11,58 +11,31 @@ test_output_input_unmanaged_and_exclusive_lock (test_merge.MergeTests.test_outpu
 test_reject_corrupt_unique_tiles_sizes_coords_and_schema (test_merge.MergeTests.test_reject_corrupt_unique_tiles_sizes_coords_and_schema) ... ok
 test_reject_oversized_blob_before_fetch_and_decoder_bomb (test_merge.MergeTests.test_reject_oversized_blob_before_fetch_and_decoder_bomb) ... ok
 test_sigkill_before_and_after_commit_exact_resume_and_active_order (test_merge.MergeTests.test_sigkill_before_and_after_commit_exact_resume_and_active_order) ... ok
-test_source_mutation_marks_tainted_and_blocks_resume (test_merge.MergeTests.test_source_mutation_marks_tainted_and_blocks_resume) ... plan: new_or_active=1 skipped=0 workers=1
-bounds_fallback: path=<temporary-path> reason=missing/invalid bounds; using whole TMS tile extents
-import: path=<temporary-path> resumed_tiles=0
+test_source_mutation_marks_tainted_and_blocks_resume (test_merge.MergeTests.test_source_mutation_marks_tainted_and_blocks_resume) ... plan: mode=overlay base_zoom=None min_zoom=0 new_or_active=1 skipped=0 workers=1
+bounds_fallback: path=<temporary>/a.mbtiles reason=missing/invalid bounds; using whole TMS tile extents
+import: path=<temporary>/a.mbtiles resumed_tiles=0
 progress: path=a.mbtiles tiles=1 overlaps=0 batch_bytes=4194344 peak_inflight=1
 ok
 test_wal_input_refused (test_merge.MergeTests.test_wal_input_refused) ... ok
 test_worker_failure_rolls_back_already_written_sql_batch (test_merge.MergeTests.test_worker_failure_rolls_back_already_written_sql_batch) ... ok
 test_autodetect_missing_metadata_and_paletted_gray_rgb_png (test_png.PNGTests.test_autodetect_missing_metadata_and_paletted_gray_rgb_png) ... ok
+test_legacy_ledger_is_refused_without_reinterpretation_or_file_changes (test_png.PNGTests.test_legacy_ledger_is_refused_without_reinterpretation_or_file_changes) ... ok
 test_mixed_sources_uniform_output_both_formats (test_png.PNGTests.test_mixed_sources_uniform_output_both_formats) ... ok
 test_png_bombs_crc_animation_16bit_and_metadata_mismatch (test_png.PNGTests.test_png_bombs_crc_animation_16bit_and_metadata_mismatch) ... ok
 test_png_compression_and_output_format_are_frozen_on_resume (test_png.PNGTests.test_png_compression_and_output_format_are_frozen_on_resume) ... ok
 test_png_input_output_overlap_and_original_bytes (test_png.PNGTests.test_png_input_output_overlap_and_original_bytes) ... ok
 test_unique_transcodes_reserve_output_bytes_and_enforce_blob_limit (test_png.PNGTests.test_unique_transcodes_reserve_output_bytes_and_enforce_blob_limit) ... ok
-test_v1_webp_ledger_upgrades_and_accepts_new_png_source (test_png.PNGTests.test_v1_webp_ledger_upgrades_and_accepts_new_png_source) ... ok
 test_verify_rejects_wrong_output_encoding (test_png.PNGTests.test_verify_rejects_wrong_output_encoding) ... ok
+test_common_base_validation_and_frozen_configuration (test_pyramid.PyramidTests.test_common_base_validation_and_frozen_configuration) ... ok
+test_default_mode_and_tms_parent_quadrants_ignore_supplied_overviews (test_pyramid.PyramidTests.test_default_mode_and_tms_parent_quadrants_ignore_supplied_overviews) ... ok
+test_incremental_rebuild_only_touched_ancestors_matches_fresh_output (test_pyramid.PyramidTests.test_incremental_rebuild_only_touched_ancestors_matches_fresh_output) ... ok
+test_late_base_batch_seeks_index_without_rescanning_earlier_tiles (test_pyramid.PyramidTests.test_late_base_batch_seeks_index_without_rescanning_earlier_tiles) ... ok
+test_lossy_webp_is_transcoded_even_without_overlap (test_pyramid.PyramidTests.test_lossy_webp_is_transcoded_even_without_overlap) ... ok
+test_many_sources_share_low_zoom_but_overviews_are_generated_once (test_pyramid.PyramidTests.test_many_sources_share_low_zoom_but_overviews_are_generated_once) ... ok
+test_merge_before_downsampling_and_premultiplied_alpha (test_pyramid.PyramidTests.test_merge_before_downsampling_and_premultiplied_alpha) ... ok
+test_sigkill_import_and_overview_transactions_resume_exactly (test_pyramid.PyramidTests.test_sigkill_import_and_overview_transactions_resume_exactly) ... ok
 
 ----------------------------------------------------------------------
-Ran 22 tests in 24.391s
-
-OK
-
-
-Python 3.12.14 / Pillow 13.0.0
-
-test_alpha_priority_tms_metadata_and_incremental (test_merge.MergeTests.test_alpha_priority_tms_metadata_and_incremental) ... ok
-test_blocked_wal_checkpoint_stops_then_resumes (test_merge.MergeTests.test_blocked_wal_checkpoint_stops_then_resumes) ... ok
-test_bounds_fallback_southern_tms_and_wrap (test_merge.MergeTests.test_bounds_fallback_southern_tms_and_wrap) ... ok
-test_byte_budget_not_only_row_count (test_merge.MergeTests.test_byte_budget_not_only_row_count) ... ok
-test_changed_source_same_size_and_mtime_refused_before_new_writes (test_merge.MergeTests.test_changed_source_same_size_and_mtime_refused_before_new_writes) ... ok
-test_keyset_query_plan_uses_indexes (test_merge.MergeTests.test_keyset_query_plan_uses_indexes) ... ok
-test_manifest_order_empty_sources_and_default_directory_sort (test_merge.MergeTests.test_manifest_order_empty_sources_and_default_directory_sort) ... ok
-test_output_input_unmanaged_and_exclusive_lock (test_merge.MergeTests.test_output_input_unmanaged_and_exclusive_lock) ... ok
-test_reject_corrupt_unique_tiles_sizes_coords_and_schema (test_merge.MergeTests.test_reject_corrupt_unique_tiles_sizes_coords_and_schema) ... ok
-test_reject_oversized_blob_before_fetch_and_decoder_bomb (test_merge.MergeTests.test_reject_oversized_blob_before_fetch_and_decoder_bomb) ... ok
-test_sigkill_before_and_after_commit_exact_resume_and_active_order (test_merge.MergeTests.test_sigkill_before_and_after_commit_exact_resume_and_active_order) ... ok
-test_source_mutation_marks_tainted_and_blocks_resume (test_merge.MergeTests.test_source_mutation_marks_tainted_and_blocks_resume) ... plan: new_or_active=1 skipped=0 workers=1
-bounds_fallback: path=<temporary-path> reason=missing/invalid bounds; using whole TMS tile extents
-import: path=<temporary-path> resumed_tiles=0
-progress: path=a.mbtiles tiles=1 overlaps=0 batch_bytes=4194344 peak_inflight=1
-ok
-test_wal_input_refused (test_merge.MergeTests.test_wal_input_refused) ... ok
-test_worker_failure_rolls_back_already_written_sql_batch (test_merge.MergeTests.test_worker_failure_rolls_back_already_written_sql_batch) ... ok
-test_autodetect_missing_metadata_and_paletted_gray_rgb_png (test_png.PNGTests.test_autodetect_missing_metadata_and_paletted_gray_rgb_png) ... ok
-test_mixed_sources_uniform_output_both_formats (test_png.PNGTests.test_mixed_sources_uniform_output_both_formats) ... ok
-test_png_bombs_crc_animation_16bit_and_metadata_mismatch (test_png.PNGTests.test_png_bombs_crc_animation_16bit_and_metadata_mismatch) ... ok
-test_png_compression_and_output_format_are_frozen_on_resume (test_png.PNGTests.test_png_compression_and_output_format_are_frozen_on_resume) ... ok
-test_png_input_output_overlap_and_original_bytes (test_png.PNGTests.test_png_input_output_overlap_and_original_bytes) ... ok
-test_unique_transcodes_reserve_output_bytes_and_enforce_blob_limit (test_png.PNGTests.test_unique_transcodes_reserve_output_bytes_and_enforce_blob_limit) ... ok
-test_v1_webp_ledger_upgrades_and_accepts_new_png_source (test_png.PNGTests.test_v1_webp_ledger_upgrades_and_accepts_new_png_source) ... ok
-test_verify_rejects_wrong_output_encoding (test_png.PNGTests.test_verify_rejects_wrong_output_encoding) ... ok
-
-----------------------------------------------------------------------
-Ran 22 tests in 17.165s
+Ran 30 tests in 48.254s
 
 OK
