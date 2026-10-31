@@ -1,0 +1,68 @@
+Python 3.12.14 / Pillow 12.3.0
+
+test_alpha_priority_tms_metadata_and_incremental (test_merge.MergeTests.test_alpha_priority_tms_metadata_and_incremental) ... ok
+test_blocked_wal_checkpoint_stops_then_resumes (test_merge.MergeTests.test_blocked_wal_checkpoint_stops_then_resumes) ... ok
+test_bounds_fallback_southern_tms_and_wrap (test_merge.MergeTests.test_bounds_fallback_southern_tms_and_wrap) ... ok
+test_byte_budget_not_only_row_count (test_merge.MergeTests.test_byte_budget_not_only_row_count) ... ok
+test_changed_source_same_size_and_mtime_refused_before_new_writes (test_merge.MergeTests.test_changed_source_same_size_and_mtime_refused_before_new_writes) ... ok
+test_keyset_query_plan_uses_indexes (test_merge.MergeTests.test_keyset_query_plan_uses_indexes) ... ok
+test_manifest_order_empty_sources_and_default_directory_sort (test_merge.MergeTests.test_manifest_order_empty_sources_and_default_directory_sort) ... ok
+test_output_input_unmanaged_and_exclusive_lock (test_merge.MergeTests.test_output_input_unmanaged_and_exclusive_lock) ... ok
+test_reject_corrupt_unique_tiles_sizes_coords_and_schema (test_merge.MergeTests.test_reject_corrupt_unique_tiles_sizes_coords_and_schema) ... ok
+test_reject_oversized_blob_before_fetch_and_decoder_bomb (test_merge.MergeTests.test_reject_oversized_blob_before_fetch_and_decoder_bomb) ... ok
+test_sigkill_before_and_after_commit_exact_resume_and_active_order (test_merge.MergeTests.test_sigkill_before_and_after_commit_exact_resume_and_active_order) ... ok
+test_source_mutation_marks_tainted_and_blocks_resume (test_merge.MergeTests.test_source_mutation_marks_tainted_and_blocks_resume) ... plan: new_or_active=1 skipped=0 workers=1
+bounds_fallback: path=<temporary-path> reason=missing/invalid bounds; using whole TMS tile extents
+import: path=<temporary-path> resumed_tiles=0
+progress: path=a.mbtiles tiles=1 overlaps=0 batch_bytes=4194344 peak_inflight=1
+ok
+test_wal_input_refused (test_merge.MergeTests.test_wal_input_refused) ... ok
+test_worker_failure_rolls_back_already_written_sql_batch (test_merge.MergeTests.test_worker_failure_rolls_back_already_written_sql_batch) ... ok
+test_autodetect_missing_metadata_and_paletted_gray_rgb_png (test_png.PNGTests.test_autodetect_missing_metadata_and_paletted_gray_rgb_png) ... ok
+test_mixed_sources_uniform_output_both_formats (test_png.PNGTests.test_mixed_sources_uniform_output_both_formats) ... ok
+test_png_bombs_crc_animation_16bit_and_metadata_mismatch (test_png.PNGTests.test_png_bombs_crc_animation_16bit_and_metadata_mismatch) ... ok
+test_png_compression_and_output_format_are_frozen_on_resume (test_png.PNGTests.test_png_compression_and_output_format_are_frozen_on_resume) ... ok
+test_png_input_output_overlap_and_original_bytes (test_png.PNGTests.test_png_input_output_overlap_and_original_bytes) ... ok
+test_unique_transcodes_reserve_output_bytes_and_enforce_blob_limit (test_png.PNGTests.test_unique_transcodes_reserve_output_bytes_and_enforce_blob_limit) ... ok
+test_v1_webp_ledger_upgrades_and_accepts_new_png_source (test_png.PNGTests.test_v1_webp_ledger_upgrades_and_accepts_new_png_source) ... ok
+test_verify_rejects_wrong_output_encoding (test_png.PNGTests.test_verify_rejects_wrong_output_encoding) ... ok
+
+----------------------------------------------------------------------
+Ran 22 tests in 24.391s
+
+OK
+
+
+Python 3.12.14 / Pillow 13.0.0
+
+test_alpha_priority_tms_metadata_and_incremental (test_merge.MergeTests.test_alpha_priority_tms_metadata_and_incremental) ... ok
+test_blocked_wal_checkpoint_stops_then_resumes (test_merge.MergeTests.test_blocked_wal_checkpoint_stops_then_resumes) ... ok
+test_bounds_fallback_southern_tms_and_wrap (test_merge.MergeTests.test_bounds_fallback_southern_tms_and_wrap) ... ok
+test_byte_budget_not_only_row_count (test_merge.MergeTests.test_byte_budget_not_only_row_count) ... ok
+test_changed_source_same_size_and_mtime_refused_before_new_writes (test_merge.MergeTests.test_changed_source_same_size_and_mtime_refused_before_new_writes) ... ok
+test_keyset_query_plan_uses_indexes (test_merge.MergeTests.test_keyset_query_plan_uses_indexes) ... ok
+test_manifest_order_empty_sources_and_default_directory_sort (test_merge.MergeTests.test_manifest_order_empty_sources_and_default_directory_sort) ... ok
+test_output_input_unmanaged_and_exclusive_lock (test_merge.MergeTests.test_output_input_unmanaged_and_exclusive_lock) ... ok
+test_reject_corrupt_unique_tiles_sizes_coords_and_schema (test_merge.MergeTests.test_reject_corrupt_unique_tiles_sizes_coords_and_schema) ... ok
+test_reject_oversized_blob_before_fetch_and_decoder_bomb (test_merge.MergeTests.test_reject_oversized_blob_before_fetch_and_decoder_bomb) ... ok
+test_sigkill_before_and_after_commit_exact_resume_and_active_order (test_merge.MergeTests.test_sigkill_before_and_after_commit_exact_resume_and_active_order) ... ok
+test_source_mutation_marks_tainted_and_blocks_resume (test_merge.MergeTests.test_source_mutation_marks_tainted_and_blocks_resume) ... plan: new_or_active=1 skipped=0 workers=1
+bounds_fallback: path=<temporary-path> reason=missing/invalid bounds; using whole TMS tile extents
+import: path=<temporary-path> resumed_tiles=0
+progress: path=a.mbtiles tiles=1 overlaps=0 batch_bytes=4194344 peak_inflight=1
+ok
+test_wal_input_refused (test_merge.MergeTests.test_wal_input_refused) ... ok
+test_worker_failure_rolls_back_already_written_sql_batch (test_merge.MergeTests.test_worker_failure_rolls_back_already_written_sql_batch) ... ok
+test_autodetect_missing_metadata_and_paletted_gray_rgb_png (test_png.PNGTests.test_autodetect_missing_metadata_and_paletted_gray_rgb_png) ... ok
+test_mixed_sources_uniform_output_both_formats (test_png.PNGTests.test_mixed_sources_uniform_output_both_formats) ... ok
+test_png_bombs_crc_animation_16bit_and_metadata_mismatch (test_png.PNGTests.test_png_bombs_crc_animation_16bit_and_metadata_mismatch) ... ok
+test_png_compression_and_output_format_are_frozen_on_resume (test_png.PNGTests.test_png_compression_and_output_format_are_frozen_on_resume) ... ok
+test_png_input_output_overlap_and_original_bytes (test_png.PNGTests.test_png_input_output_overlap_and_original_bytes) ... ok
+test_unique_transcodes_reserve_output_bytes_and_enforce_blob_limit (test_png.PNGTests.test_unique_transcodes_reserve_output_bytes_and_enforce_blob_limit) ... ok
+test_v1_webp_ledger_upgrades_and_accepts_new_png_source (test_png.PNGTests.test_v1_webp_ledger_upgrades_and_accepts_new_png_source) ... ok
+test_verify_rejects_wrong_output_encoding (test_png.PNGTests.test_verify_rejects_wrong_output_encoding) ... ok
+
+----------------------------------------------------------------------
+Ran 22 tests in 17.165s
+
+OK

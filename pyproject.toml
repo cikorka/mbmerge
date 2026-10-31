@@ -1,0 +1,47 @@
+# SPDX-License-Identifier: MIT
+[build-system]
+requires = ["setuptools>=77.0.3"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mbmerge"
+dynamic = ["version", "dependencies"]
+description = "Incremental PNG/WebP raster MBTiles merger with alpha compositing and crash-safe resume"
+readme = {file = "README.pypi.md", content-type = "text/markdown"}
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE.md", "LICENSE.cs.md"]
+authors = [{name = "mbmerge contributors"}]
+keywords = ["mbtiles", "raster", "gis", "png", "webp", "tiles", "merge"]
+classifiers = [
+    "Environment :: Console",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS :: MacOS X",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: GIS",
+]
+
+[project.urls]
+Repository = "https://github.com/cikorka/mbmerge"
+Documentation = "https://github.com/cikorka/mbmerge#readme"
+Issues = "https://github.com/cikorka/mbmerge/issues"
+
+[project.scripts]
+mbmerge = "merge_mbtiles:main"
+
+[project.optional-dependencies]
+release = ["build>=1.2,<2", "twine>=6,<8"]
+
+[tool.setuptools]
+# Explicit modules prevent examples/tests/data from becoming import packages.
+py-modules = ["merge_mbtiles", "mbmerge"]
+include-package-data = false
+
+[tool.setuptools.dynamic]
+# Keep CLI, wheel and sdist versions sourced from one literal in the core module.
+version = {attr = "merge_mbtiles.VERSION"}
+dependencies = {file = ["requirements.txt"]}

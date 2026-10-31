@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: MIT
+name: Publish manually to TestPyPI
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: testpypi-publish
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    # Private evaluation never publishes to a public package index.
+    if: ${{ !github.event.repository.private && vars.TESTPYPI_PUBLISH_ENABLED == 'true' }}
+    needs: checks
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/project/mbmerge/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v6
+        with:
+          name: python-distributions
+          path: dist/
+      - name: Publish using TestPyPI Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/

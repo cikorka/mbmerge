@@ -1,0 +1,22 @@
+# Source distributions carry reproducible tests/docs, but never arbitrary data.
+include pyproject.toml requirements.txt .gitignore
+include README*.md ARCHITECTURE*.md RELEASING*.md LICENSE*.md TEST_REPORT*.md
+include TEST_RESULTS.txt BENCHMARK.json
+recursive-include tests *.py
+recursive-include examples *.py
+recursive-include tools *.py
+recursive-include docs/images *.png
+recursive-include .github/workflows *.yml
+# Only these named synthetic databases may enter a distribution.
+include demo/source_a.mbtiles demo/source_b.mbtiles
+include demo/png/source_a.mbtiles demo/png/source_b.mbtiles
+include demo/a.png demo/b.png demo/expected_overlap.png
+include demo/png/a.png demo/png/b.png demo/png/expected_overlap.png
+# This checksum file describes the downloadable repository ZIP, not an sdist.
+exclude SHA256SUMS
+prune build
+prune dist
+prune work
+prune .venv
+prune .git
+global-exclude *.py[cod] .DS_Store *.merge.lock *-wal *-shm *-journal

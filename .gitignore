@@ -1,0 +1,76 @@
+# Version in Git:
+#   Python source, tests, examples, tools/, requirements.txt, and this .gitignore.
+#   pyproject.toml, MANIFEST.in, and .github/workflows/.
+#   README*.md, TEST_REPORT*.md, ARCHITECTURE*.md, LICENSE*.md, docs/images/, and the demo PNG previews.
+#   The synthetic WebP/PNG MBTiles fixtures explicitly allowed below.
+#   Curated BENCHMARK.json, TEST_RESULTS.txt, and release SHA256SUMS.
+#
+# Keep real datasets, generated outputs, local logs, and credentials out of Git.
+# Ignoring a file does not remove it if it has already been committed.
+
+# Real inputs and generated raster archives. Only bundled synthetic fixtures ship.
+*.mbtiles
+!/demo/source_a.mbtiles
+!/demo/source_b.mbtiles
+!/demo/png/source_a.mbtiles
+!/demo/png/source_b.mbtiles
+*.db
+*.sqlite
+*.sqlite3
+
+# SQLite sidecars and the merger's runtime lock. Never commit or delete live locks.
+*-wal
+*-shm
+*-journal
+*.merge.lock
+
+# Local datasets, scratch files, and generated demo sets.
+/data/
+/inputs/
+/outputs/
+/work/
+/new_demo*/
+
+# Run logs and local benchmark output. Curated reports above remain versioned.
+*.log
+*.jsonl
+/benchmark*.local.json
+
+# Python environments, bytecode, caches, test coverage, and package builds.
+.venv*/
+venv/
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.egg-info/
+/build/
+/dist/
+
+# Local environment settings. A sanitized example can be committed.
+.env
+.env.*
+!.env.example
+
+# Editor and operating-system files.
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Distribute release archives as downloads rather than repository source files.
+*.zip
+*.tar.gz
+
+# Wheel rebuilt from an sdist during release verification.
+/rebuilt/

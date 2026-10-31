@@ -1,0 +1,93 @@
+{
+  "cli_version": "1.1.0",
+  "benchmarks": [
+    {
+      "python": "3.12.14",
+      "sqlite": "3.53.1",
+      "platform": "macOS-27.2-arm64-arm-64bit",
+      "webp": "1.6.0",
+      "workers": 4,
+      "tile_size": 512,
+      "output_format": "webp",
+      "measurement": "sampled simultaneous sum of parent+descendant RSS; shared pages counted multiple times; excludes filesystem page cache",
+      "runs": [
+        {
+          "tiles_per_source": 64,
+          "contributions": 128,
+          "input_bytes": 101228544,
+          "output_bytes": 51412992,
+          "elapsed_seconds": 4.14,
+          "peak_tree_rss_mib": 423.67,
+          "max_processes": 6,
+          "pipeline": {
+            "event": "finished",
+            "seconds": 4.026,
+            "batches": 17,
+            "peak_inflight": 8,
+            "peak_batch_bytes": 33130860
+          }
+        },
+        {
+          "tiles_per_source": 512,
+          "contributions": 1024,
+          "input_bytes": 809558016,
+          "output_bytes": 405577728,
+          "elapsed_seconds": 33.246,
+          "peak_tree_rss_mib": 390.14,
+          "max_processes": 6,
+          "pipeline": {
+            "event": "finished",
+            "seconds": 33.123,
+            "batches": 128,
+            "peak_inflight": 8,
+            "peak_batch_bytes": 33130860
+          }
+        }
+      ]
+    },
+    {
+      "python": "3.12.14",
+      "sqlite": "3.53.1",
+      "platform": "macOS-27.2-arm64-arm-64bit",
+      "webp": "1.6.0",
+      "workers": 4,
+      "tile_size": 512,
+      "output_format": "png",
+      "measurement": "sampled simultaneous sum of parent+descendant RSS; shared pages counted multiple times; excludes filesystem page cache",
+      "runs": [
+        {
+          "tiles_per_source": 64,
+          "contributions": 128,
+          "input_bytes": 101228544,
+          "output_bytes": 58437632,
+          "elapsed_seconds": 5.087,
+          "peak_tree_rss_mib": 313.25,
+          "max_processes": 6,
+          "pipeline": {
+            "event": "finished",
+            "seconds": 4.972,
+            "batches": 24,
+            "peak_inflight": 6,
+            "peak_batch_bytes": 29898804
+          }
+        },
+        {
+          "tiles_per_source": 512,
+          "contributions": 1024,
+          "input_bytes": 809558016,
+          "output_bytes": 460922880,
+          "elapsed_seconds": 30.231,
+          "peak_tree_rss_mib": 321.27,
+          "max_processes": 6,
+          "pipeline": {
+            "event": "finished",
+            "seconds": 30.067,
+            "batches": 189,
+            "peak_inflight": 6,
+            "peak_batch_bytes": 29898804
+          }
+        }
+      ]
+    }
+  ]
+}

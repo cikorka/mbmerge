@@ -1,0 +1,87 @@
+# SPDX-License-Identifier: MIT
+name: Tests and distributions
+
+on:
+  push:
+  pull_request:
+  workflow_call:
+    inputs:
+      release_tag:
+        description: Optional v<VERSION> tag to validate before publishing
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ['3.11', '3.12', '3.13', '3.14']
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements.txt
+      - name: Install project and runtime dependencies
+        run: python -m pip install -e .
+      - name: Run synthetic and SIGKILL recovery tests
+        run: python -m unittest discover -s tests -v
+      - name: Check installed command and module entry points
+        run: |
+          mbmerge --version
+          python -m mbmerge --version
+
+  distributions:
+    name: Build, inspect and install distributions
+    runs-on: ubuntu-latest
+    env:
+      # Treat a release tag as data, never interpolate it directly into shell code.
+      RELEASE_TAG: ${{ inputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements.txt
+      - name: Install build and metadata validation tools
+        run: python -m pip install '.[release]'
+      - name: Build wheel and source distribution
+        run: python -m build
+      - name: Validate metadata, source version and optional release tag
+        run: |
+          python -m twine check --strict dist/*
+          python tools/check_release.py --dist-dir dist --tag "$RELEASE_TAG"
+      - name: Install the exact wheel being published
+        run: python -m pip install --force-reinstall --no-deps dist/*.whl
+      - name: Exercise installed wheel without checkout imports
+        run: python -I tools/smoke_installed.py
+      - name: Build a wheel from the source distribution too
+        run: python -m pip wheel --no-deps dist/*.tar.gz --wheel-dir rebuilt
+      - name: Exercise the rebuilt wheel
+        run: |
+          python -m pip install --force-reinstall --no-deps rebuilt/*.whl
+          python -I tools/smoke_installed.py
+      - name: Store only the validated release distributions
+        uses: actions/upload-artifact@v5
+        with:
+          name: python-distributions
+          path: dist/
+          if-no-files-found: error
