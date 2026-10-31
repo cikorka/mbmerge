@@ -9,7 +9,7 @@ Verze 2 používá spravované schéma **3**. Výchozí `pyramid` importuje spol
 | Funkce | Odpovědnost |
 |---|---|
 | `merge` | Zámek, kontrola historie, plán importů, obě fáze a dokončení |
-| `open_output` | Odmítnutí cizích/starých výstupů, schéma, pevná nastavení, WAL/cache |
+| `managed_objects`, `open_output` | Read-only odmítnutí cizích/starých výstupů, schéma, pevná nastavení, WAL/cache |
 | `prepare_sources` | Kontrola skutečných maxim nebo explicitního společného zoomu před importem pixelů |
 | `source`, `digest`, `preflight` | Zamčené snapshoty, SHA-256 a neměnná historie |
 | `read_batch`, `import_source` | Bajtově omezené čtení, pořadí zdrojů a atomické kurzory |
@@ -27,7 +27,7 @@ Verze 2 používá spravované schéma **3**. Výchozí `pyramid` importuje spol
 
 Základní úroveň vychází z indexovaných klíčů, ne deklarace maxzoom. Automatika vyžaduje shodná skutečná maxima neprázdných navržených vstupů; explicitní úroveň musí být v každém přítomná. Plán otevírá postupně jeden zdroj a drží jen malé deskriptory. Import úroveň znovu ověří ve vlastním zamčeném snapshotu. První zcela prázdná sada vyžaduje explicitní zoom. Ostatní dodané zoomy se v pyramidě ignorují.
 
-Schémata 1/2 patří verzi 1.x. Odmítej je před změnou journal mode/dat. Již složené nižší zoomy nelze tiše reinterpretovat jako odvozenou pyramidu ani předpokládat jejich bezztrátovost. Nový výstup se staví z původních zdrojů. Starý archiv lze vědomě použít jako zploštěný zdroj; původní vrstvy se neobnoví.
+Schémata 1/2 patří verzi 1.x. Vlastnictví/schéma se ověřuje pouze pro čtení před jakýmkoli otevřením pro zápis, takže odmítnutí nemůže vedlejším efektem provést checkpoint existujícího WAL. Již složené nižší zoomy nelze tiše reinterpretovat jako odvozenou pyramidu ani předpokládat jejich bezztrátovost. Nový výstup se staví z původních zdrojů. Starý archiv lze vědomě použít jako zploštěný zdroj; původní vrstvy se neobnoví.
 
 ## Writer a pořadí
 

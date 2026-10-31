@@ -5,6 +5,7 @@ Reuse test helpers through a module, not an imported TestCase class: unittest
 would otherwise discover that class again and run the base suite twice.
 """
 import io
+from contextlib import closing
 import json
 import sqlite3
 import struct
@@ -130,21 +131,24 @@ class PNGTests(unittest.TestCase):
         fixture(a, [(2, 0, 0, webp(red))], {"format": "webp"})
         fixture(b, [(2, 0, 0, png(blue))], {"format": "png"})
         self.cli("--input", a)
-        with sqlite3.connect(self.out) as db:
+        with closing(sqlite3.connect(self.out)) as db:
             settings = json.loads(db.execute("SELECT settings FROM _merge_config").fetchone()[0])
             # Reconstruct the actual schema-1 settings shape, rather than
             # merely lowering the version on a modern-format configuration.
             del settings["output_format"], settings["png_compress_level"]
-            db.execute("UPDATE _merge_config SET version=1,settings=?", (json.dumps(settings),))
-        for version in (1, 2):
-            with sqlite3.connect(self.out) as db:
-                db.execute("UPDATE _merge_config SET version=?", (version,))
-            before = self.out.read_bytes()
-            rejected = self.cli("--input", b, check=False)
-            self.assertNotEqual(rejected.returncode, 0)
-            self.assertIn("NEW output", rejected.stderr)
-            self.assertEqual(self.out.read_bytes(), before)
-            self.pixels_equal(all_tiles(self.out)[(2, 0, 0)], red)
+            for version in (1, 2):
+                db.execute("UPDATE _merge_config SET version=?,settings=?", (version, json.dumps(settings)))
+                db.commit()
+                # Keep an existing connection open so committed schema changes
+                # remain in WAL. Refusal must not checkpoint them into the main
+                # file as a side effect of opening/closing a writable connection.
+                self.assertGreater((self.out.parent / (self.out.name + "-wal")).stat().st_size, 0)
+                before = self.out.read_bytes()
+                rejected = self.cli("--input", b, check=False)
+                self.assertNotEqual(rejected.returncode, 0)
+                self.assertIn("NEW output", rejected.stderr)
+                self.assertEqual(self.out.read_bytes(), before)
+                self.pixels_equal(all_tiles(self.out)[(2, 0, 0)], red)
 
     def test_unique_transcodes_reserve_output_bytes_and_enforce_blob_limit(self):
         a = self.root / "a.mbtiles"

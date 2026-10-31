@@ -509,21 +509,34 @@ def checkpoint(db):
         raise MergeError("WAL checkpoint blocked by another reader; close output readers and resume. Latest batch is committed.")
 
 
+def managed_objects(db):
+    """Inspect ownership/schema without changing pragmas or starting a writer."""
+    objects = {r[0] for r in db.execute("SELECT name FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'")}
+    if objects and "_merge_config" not in objects:
+        raise MergeError("Output is an unmanaged database. Use a NEW output and pass the old MBTiles as the first --input.")
+    if objects:
+        row = db.execute("SELECT version FROM _merge_config WHERE id=1").fetchone()
+        if not row or row[0] != SCHEMA_VERSION:
+            raise MergeError("Unsupported output schema version. Version 2 requires a NEW output; rebuild from original inputs. Existing archives are not modified.")
+    return objects
+
+
 def open_output(path, args):
     """Create/open a managed archive and resolve immutable encoding settings.
 
     Never adopt arbitrary pre-existing tiles or reinterpret a v1 ledger as a
     pyramid. Resolve immutable mode, grid and encoding settings for the pipeline.
     """
+    # Even opening and closing an otherwise unused READ-WRITE WAL connection can
+    # checkpoint committed pages into the main file. Reject foreign/old archives
+    # through a read-only connection before ever requesting write access.
+    if path.exists():
+        with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True,
+                                     isolation_level=None, timeout=args.busy_timeout)) as probe:
+            managed_objects(probe)
     db = sqlite3.connect(path, isolation_level=None, timeout=args.busy_timeout)
     try:
-        objects = {r[0] for r in db.execute("SELECT name FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'")}
-        if objects and "_merge_config" not in objects:
-            raise MergeError("Output is an unmanaged database. Use a NEW output and pass the old MBTiles as the first --input.")
-        if objects:
-            row = db.execute("SELECT version FROM _merge_config WHERE id=1").fetchone()
-            if not row or row[0] != SCHEMA_VERSION:
-                raise MergeError("Unsupported output schema version. Version 2 requires a NEW output; rebuild from original inputs. Existing archives are not modified.")
+        objects = managed_objects(db)  # recheck after reopening, under the CLI lock
         connection_limits(db, args.cache_mib, args.max_tile_mib * MIB)
         db.execute(f"PRAGMA busy_timeout={int(args.busy_timeout * 1000)}")
         if db.execute("PRAGMA journal_mode=WAL").fetchone()[0].lower() != "wal":

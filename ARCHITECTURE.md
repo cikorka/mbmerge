@@ -9,7 +9,7 @@ Version 2 uses managed schema **3**. The default `pyramid` pipeline imports one 
 | Function | Responsibility |
 |---|---|
 | `merge` | Lock output, verify historical sources, plan imports, run both phases, mark complete |
-| `open_output` | Refuse unmanaged/old outputs, create schema, freeze settings, establish WAL/caches |
+| `managed_objects`, `open_output` | Read-only refusal of unmanaged/old outputs, create schema, freeze settings, establish WAL/caches |
 | `prepare_sources` | Check actual source maxima or an explicit common base before importing proposed pixels |
 | `source`, `digest`, `preflight` | Locked read snapshots, SHA-256 identity, immutable historical input contract |
 | `read_batch`, `import_source` | Byte-bounded base/all-level reads, ordered source composition, atomic source checkpoints |
@@ -27,7 +27,7 @@ Version 2 uses managed schema **3**. The default `pyramid` pipeline imports one 
 
 The base level is selected from actual indexed tile keys, never declared maxzoom. Automatic selection requires equal maxima across nonempty proposed inputs. Explicit selection requires that level in every nonempty input. Planning reads one source at a time and retains only small descriptors. The level is rechecked under the import snapshot. Empty-only initial input lists need an explicit level. Imported sources may contain lower/higher levels; only the selected base is used in pyramid mode.
 
-Schemas 1 and 2 belong to version 1.x. Reject them before changing journal mode or data; do not silently reinterpret already composed lower levels or assume their WebP was entirely lossless. Rebuild from original sources to a new output. The old archive may be used as an explicitly flattened source but cannot recover original layers.
+Schemas 1 and 2 belong to version 1.x. A read-only ownership/schema probe runs before any writable open, so rejection cannot checkpoint an existing WAL as a side effect. Do not silently reinterpret already composed lower levels or assume their WebP was entirely lossless. Rebuild from original sources to a new output. The old archive may be used as an explicitly flattened source but cannot recover original layers.
 
 ## Writer and ordering
 

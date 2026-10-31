@@ -36,6 +36,6 @@ test_merge_before_downsampling_and_premultiplied_alpha (test_pyramid.PyramidTest
 test_sigkill_import_and_overview_transactions_resume_exactly (test_pyramid.PyramidTests.test_sigkill_import_and_overview_transactions_resume_exactly) ... ok
 
 ----------------------------------------------------------------------
-Ran 30 tests in 48.254s
+Ran 30 tests in 45.514s
 
 OK

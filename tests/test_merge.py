@@ -60,7 +60,7 @@ def fixture(path, rows, metadata=None, indexed=True):
 
 def all_tiles(path):
     """Materialize only small test archives for deterministic blob comparisons."""
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as db:
         return dict((tuple(r[:3]), r[3]) for r in db.execute("SELECT * FROM tiles ORDER BY 1,2,3"))
 
 
