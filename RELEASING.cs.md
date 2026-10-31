@@ -26,6 +26,12 @@ Python prerelease má tvar například `1.2.0rc1`, odpovídající tag je `v1.2.
 
 Build a testy mají pouze čtení repozitáře. Jen publikační joby dostávají `id-token: write`. Publikační job nestahuje zdrojový checkout ani nic nesestavuje: převezme ověřené artefakty ze svého běhu až po úspěchu všech kontrol. V repozitáři není uložen API token ani heslo. Samotný push tagu na PyPI nepublikuje.
 
+## Co se sestavuje a proč CI používá Node.js
+
+Výsledkem je Python wheel (`py3-none-any`) a zdrojový archiv, nikoli samostatný nativní executable. Instalace vytvoří příkaz `mbmerge` v `bin`, který používá Python a Pillow. Matice Linux/macOS ověřuje kompatibilitu Pythonu, SQLite, zamykání souborů a obrazových knihoven; nekompiluje binárky pro tyto systémy.
+
+GitHub Actions používá Node.js interně pro akce checkout, setup-python a přenos artefaktů. Přímo zvolené JavaScriptové akce používají Node.js 24; artefakty přenášejí `upload-artifact@v7.0.2` a `download-artifact@v8.0.2`. Node.js není závislost instalovaného mbmerge a do wheelu se nepřidává.
+
 ## Soukromé ověřování před publikací
 
 Repozitář je [cikorka/mbmerge](https://github.com/cikorka/mbmerge). Dokud je soukromý, publikační joby PyPI i TestPyPI se přeskočí. CI, sestavení a instalace wheelu běží dál a artefakty zůstávají v soukromém repozitáři. Ověř skutečné vstupy a přínos projektu ještě před zveřejněním.

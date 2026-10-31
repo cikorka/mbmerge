@@ -34,7 +34,7 @@ jobs:
     steps:
       # Publishing has no source checkout or build commands. It receives the
       # exact artifacts from this run after all reusable CI jobs have succeeded.
-      - uses: actions/download-artifact@v6
+      - uses: actions/download-artifact@v8.0.2
         with:
           name: python-distributions
           path: dist/

@@ -26,6 +26,12 @@ Python prerelease versions use forms such as `1.2.0rc1`; a matching tag is `v1.2
 
 Build/test jobs have read-only repository permissions. Only publishing jobs request `id-token: write`. Publishing jobs do not check out code or build it: they download the artifacts from their own workflow run after all checks succeed. No API token/password is stored in the repository. A tag push alone does not publish to PyPI.
 
+## Build outputs and Node.js in CI
+
+The build produces a Python wheel (`py3-none-any`) and source archive, not a standalone native executable. Installation creates an `mbmerge` command in `bin` that uses Python and Pillow. The Linux/macOS matrix checks Python, SQLite, file-locking and image-library compatibility; it does not compile native executables for those operating systems.
+
+GitHub Actions uses Node.js internally for checkout, setup-python and artifact transfer. The directly selected JavaScript actions use Node.js 24; artifact transfer uses `upload-artifact@v7.0.2` and `download-artifact@v8.0.2`. Node.js is not an mbmerge runtime dependency and is not included in the wheel.
+
 ## Private evaluation before publishing
 
 The repository is [cikorka/mbmerge](https://github.com/cikorka/mbmerge). While it is private, both PyPI and TestPyPI publishing jobs are skipped. CI, building and wheel-installation checks still run, with artifacts retained in the private repository. Validate representative real inputs and project value before making it public.

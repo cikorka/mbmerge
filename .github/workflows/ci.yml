@@ -80,7 +80,7 @@ jobs:
           python -m pip install --force-reinstall --no-deps rebuilt/*.whl
           python -I tools/smoke_installed.py
       - name: Store only the validated release distributions
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: python-distributions
           path: dist/
