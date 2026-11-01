@@ -12,8 +12,8 @@ test_reject_corrupt_unique_tiles_sizes_coords_and_schema (test_merge.MergeTests.
 test_reject_oversized_blob_before_fetch_and_decoder_bomb (test_merge.MergeTests.test_reject_oversized_blob_before_fetch_and_decoder_bomb) ... ok
 test_sigkill_before_and_after_commit_exact_resume_and_active_order (test_merge.MergeTests.test_sigkill_before_and_after_commit_exact_resume_and_active_order) ... ok
 test_source_mutation_marks_tainted_and_blocks_resume (test_merge.MergeTests.test_source_mutation_marks_tainted_and_blocks_resume) ... plan: mode=overlay base_zoom=None min_zoom=0 new_or_active=1 reimport=0 skipped=0 workers=1
-bounds_fallback: path=<temporary>/a.mbtiles reason=missing/invalid bounds; using whole TMS tile extents
-import: path=<temporary>/a.mbtiles resumed_tiles=0
+bounds_fallback: path=/tmp/tmpdq731qrm/a.mbtiles reason=missing/invalid bounds; using whole TMS tile extents
+import: path=/tmp/tmpdq731qrm/a.mbtiles resumed_tiles=0
 progress: path=a.mbtiles tiles=1 overlaps=0 batch_bytes=4194344 peak_inflight=1
 ok
 test_wal_input_refused (test_merge.MergeTests.test_wal_input_refused) ... ok
@@ -53,6 +53,6 @@ test_output_is_lossless_flat_tms_and_merge_accepts_it (test_tile.TileTests.test_
 test_pdf_input_is_rasterized_at_requested_dpi (test_tile.TileTests.test_pdf_input_is_rasterized_at_requested_dpi) ... ok
 
 ----------------------------------------------------------------------
-Ran 46 tests in 83.629s
+Ran 46 tests in 77.682s
 
 OK

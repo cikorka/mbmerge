@@ -27,7 +27,8 @@ Simulace změny zdroje ověřuje reakci evidence, ne všechny možné souběžn�
 
 Reálné územní plány (115 dokumentů okresu Benešov, základní zoom 17, 512 px):
 
-- `tile` s ořezem v cílové mřížce: překryv sousedních obcí 0 px (jednokrokový ořez při reprojekci: 9 917 px u pěti sousedů) a žádné mezery na společných hranicích (18 435 → 0; zbylých 105 leží uvnitř jednotlivých dokumentů). Základní dlaždice jsou bajtově shodné s výstupem `gdal_translate -of MBTiles`.
+- `tile` s ořezem v cílové mřížce: překryv sousedních obcí 0 px (jednokrokový ořez při reprojekci: 9 917 px u pěti sousedů) a žádné mezery na společných hranicích (18 435 → 0; zbylých 105 leží uvnitř jednotlivých dokumentů).
+- `tile` čte warp jednou, v paralelních pásech, místo dlaždicování přes warpované VRT: největší plán (31 000 × 28 000 px, uložený po řádcích) 126 → 27 s; dvanáct dokumentů 378 → 165 s, se čtyřmi dokumenty souběžně 115 s. Proti přesnému warpu (`-et 0`) se materializované pixely liší nejvýš o 1; `gdalwarp` rovnou do souboru byl rychlejší, ale u 8 % pixelů se lišil až o 82, proto se nepoužívá.
 - `--reimport always` všech pěti dokumentů, dvakrát: výstup bajtově shodný s prvním sloučením (3 457 dlaždic).
 - `--verify-recorded stat` nad 115 evidovanými zdroji: 0,38 s.
 - Opakovaný import tří dokumentů do WebP výstupu s 49 496 dlaždicemi, zatímco MapProxy servírovala tentýž soubor: 12 100 požadavků, 0 chyb, checkpoint nebyl zablokován.
@@ -59,4 +60,4 @@ Výsledky GitHub-hosted CI jsou v Actions kontrolách větve/PR. Místní výsle
 
 ## Provozní omezení
 
-Historické zdroje zůstávají neměnné a dostupné na evidovaných cestách. Každé spuštění je znovu hashuje; první velkou sadu importuj jedním příkazem. Nahrazování/odebírání vrstev, GDAL vstupy, reprojekce, polygonový clip, Windows a samostatné executably zůstávají mimo rozsah. Osmibitový výpočet zaokrouhluje; bezztrátový kodek neznamená bezztrátové zmenšování. Publikuj dokončené zavřené archivy, vyhni se dlouhým WAL čtenářům, používej lokální SQLite disk a absolutní limit paměti nastav OS. Před provozem ověř reprezentativní skutečná data.
+Historické zdroje zůstávají neměnné a dostupné na evidovaných cestách. Každé spuštění je znovu hashuje, pokud není zadáno `--verify-recorded stat`; první velkou sadu importuj jedním příkazem. Nahrazování/odebírání vrstev, Windows a samostatné executably zůstávají mimo rozsah; GDAL vstupy, reprojekce a polygonový ořez patří do `mbmerge tile`, ne do `merge`. Osmibitový výpočet zaokrouhluje; bezztrátový kodek neznamená bezztrátové zmenšování. Publikuj dokončené zavřené archivy, vyhni se dlouhým WAL čtenářům, používej lokální SQLite disk a absolutní limit paměti nastav OS. Před provozem ověř reprezentativní skutečná data.

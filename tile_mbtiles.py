@@ -22,6 +22,7 @@ before any resampling can blend them into valid pixels.
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import io
 import json
 import math
@@ -38,6 +39,7 @@ from merge_mbtiles import image_format, lossless_webp, log
 WORLD = 40075016.685578488  # EPSG:3857 extent width in metres
 MIN_GDAL = (3, 11)
 RESAMPLING = ("auto", "nearest", "bilinear", "cubic", "lanczos", "average")
+STRIPE_ROWS = 512  # materialized stripes are multiples of this, matching their GTiff block size
 
 
 class TileError(Exception):
@@ -126,31 +128,78 @@ def tile_zoom(resolution, tile_size):
     return max(0, min(30, round(math.log2(WORLD / (tile_size * resolution)))))
 
 
-def warp(src, work, zoom, resampling, args):
-    """Resample once into the tile grid, then clip in that same grid.
+def cutline_extent(work, args):
+    """Select the cutline features into a small EPSG:3857 layer; return (path, extent).
 
-    gdalwarp evaluates a cutline in the pixel space of its *source*. Clipping
-    during the reprojection would therefore sample each boundary on a different,
-    document-specific grid, and neighbours clipped by one shared boundary would
-    overlap or leave one-pixel cracks. Clipping the already aligned raster with
-    nearest neighbour samples every boundary at the same pixel centres, so
-    adjacent sources get exactly complementary pixels.
+    Reprojecting the polygon once means the later rasterization needs no
+    transformation, and its extent bounds the warp to the clipped area.
+    """
+    cut = work / "cutline.gpkg"
+    cmd = ["ogr2ogr", "-q", "-f", "GPKG", "-t_srs", "EPSG:3857", "-nln", "cutline"]
+    if args.cwhere:
+        cmd += ["-where", args.cwhere]
+    cmd += [cut, Path(args.cutline).expanduser().resolve(strict=True)]
+    if args.cutline_layer:
+        cmd.append(args.cutline_layer)
+    run(cmd, args)
+    out = run(["ogrinfo", "-so", cut, "cutline"], args)
+    count = re.search(r"Feature Count: (\d+)", out)
+    match = re.search(r"Extent: \(([-\d.e]+), ([-\d.e]+)\) - \(([-\d.e]+), ([-\d.e]+)\)", out)
+    if not count or int(count.group(1)) == 0 or not match:
+        raise TileError(f"Cutline selects no feature ({args.cwhere or 'all'})")
+    return cut, tuple(float(v) for v in match.groups())
+
+
+def warp(src, work, zoom, resampling, args):
+    """Warp into the tile grid, materialize it in parallel stripes, clip in that same grid.
+
+    The warp itself is a VRT: gdalwarp writing straight to a file samples
+    differently (measured: 8 % of pixels off by up to 82 against an exact
+    `-et 0` warp, whereas the VRT stays within 1). Tiling *through* that VRT is
+    slow, though: every tile request decompresses whole source strips again
+    (scanned plans are typically stored one row per strip). So the VRT is read
+    once into a temporary GeoTIFF, in horizontal stripes by parallel
+    gdal_translate processes; each stripe touches only its own source rows.
+
+    Clipping happens per stripe, in the target grid, by burning the polygon into
+    the alpha band (gdal_rasterize, pixel-centre rule). gdalwarp would evaluate a
+    cutline in the pixel space of its *source*, so neighbours clipped by one
+    shared boundary would overlap or leave one-pixel cracks; in one common grid
+    every pixel centre belongs to exactly one of them.
     """
     res = WORLD / (args.tile_size * 2 ** zoom)
-    grid = ["-tr", repr(res), repr(res), "-tap"]
+    cmd = ["gdalwarp", "-q", "-overwrite", "-of", "VRT", "-t_srs", "EPSG:3857", "-tr", repr(res), repr(res),
+           "-dstalpha", "-r", resampling]
+    cut = None
+    if args.cutline:
+        cut, (minx, miny, maxx, maxy) = cutline_extent(work, args)
+        # snap outward to the tile grid; equivalent to -tap, limited to the polygon
+        cmd += ["-te", *(repr(v) for v in (math.floor(minx / res) * res, math.floor(miny / res) * res,
+                                           math.ceil(maxx / res) * res, math.ceil(maxy / res) * res))]
+    else:
+        cmd += ["-tap"]
     aligned = work / "aligned.vrt"
-    run(["gdalwarp", "-q", "-overwrite", "-of", "VRT", "-t_srs", "EPSG:3857", *grid, "-dstalpha",
-         "-r", resampling, "-wm", "256", src, aligned], args)
-    if not args.cutline:
-        return aligned
-    out = work / "clipped.vrt"
-    cmd = ["gdalwarp", "-q", "-overwrite", "-of", "VRT", *grid, "-r", "near", "-dstalpha",
-           "-cutline", Path(args.cutline).expanduser().resolve(strict=True), "-crop_to_cutline"]
-    if args.cutline_layer:
-        cmd += ["-cl", args.cutline_layer]
-    if args.cwhere:
-        cmd += ["-cwhere", args.cwhere]
-    run(cmd + [aligned, out], args)
+    run(cmd + [src, aligned], args)
+    meta = info(aligned, args)
+    width, height = meta["size"]
+    alpha = len(meta["bands"])  # -dstalpha appends alpha as the last band
+    count = min(args.threads, math.ceil(height / STRIPE_ROWS))
+    step = math.ceil(height / count / STRIPE_ROWS) * STRIPE_ROWS
+
+    def stripe(y):
+        out = work / f"stripe_{y:09d}.tif"
+        run(["gdal_translate", "-q", "-srcwin", 0, y, width, min(step, height - y),
+             "--config", "GDAL_CACHEMAX", "256", "-co", "TILED=YES", "-co", "BLOCKXSIZE=512",
+             "-co", "BLOCKYSIZE=512", "-co", "COMPRESS=ZSTD", "-co", "ZSTD_LEVEL=1", "-co", "BIGTIFF=IF_SAFER",
+             aligned, out], args)
+        if cut:
+            run(["gdal_rasterize", "-q", "-i", "-b", alpha, "-burn", "0", "-l", "cutline", cut, out], args)
+        return out
+
+    with ThreadPoolExecutor(max_workers=count) as pool:
+        stripes = list(pool.map(stripe, range(0, height, step)))
+    out = work / "materialized.vrt"
+    run(["gdalbuildvrt", "-q", out, *stripes], args)
     return out
 
 
@@ -270,7 +319,7 @@ def tile(args):
                "--format", "WEBP" if args.format == "webp" else "PNG",
                "--skip-blank", "--webviewer", "none", "--num-threads", args.threads]
         if args.format == "webp":
-            cmd += ["--co", "LOSSLESS=YES"]
+            cmd += ["--co", "LOSSLESS=YES", "--co", f"METHOD={args.webp_method}"]
         run(cmd + [warped, tiles_dir], args)
         settings = {"gdal": version, "zoom": zoom, "min_zoom": min_zoom, "tile_size": args.tile_size,
                     "native_resolution_m": round(native, 4), "resampling": resampling,

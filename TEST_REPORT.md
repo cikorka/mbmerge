@@ -27,7 +27,8 @@ Source-mutation fault injection tests the ledger response; it does not simulate 
 
 Real municipal land-use plans (115 documents, Benešov district, base zoom 17, 512 px):
 
-- `tile` with clipping in the target grid: overlap between neighbouring municipalities 0 px (one-step clipping during reprojection: 9,917 px for five neighbours) and no cracks along shared boundaries (18,435 → 0; the remaining 105 lie inside individual documents). Base tiles are byte-identical to `gdal_translate -of MBTiles` output.
+- `tile` with clipping in the target grid: overlap between neighbouring municipalities 0 px (one-step clipping during reprojection: 9,917 px for five neighbours) and no cracks along shared boundaries (18,435 → 0; the remaining 105 lie inside individual documents).
+- `tile` reads the warp once, in parallel stripes, instead of tiling through warped VRTs: the largest plan (31,000 × 28,000 px, stored one row per strip) 126 → 27 s; twelve documents 378 → 165 s, or 115 s with four documents at once. Against an exact warp (`-et 0`) the materialized pixels stay within 1; `gdalwarp` writing straight to a file was faster but off by up to 82 in 8 % of pixels, so it is not used.
 - `--reimport always` of all five documents, twice: output byte-identical to the first merge (3,457 tiles).
 - `--verify-recorded stat` over 115 recorded sources: 0.38 s.
 - Reimport of three documents into a 49,496-tile WebP output while MapProxy served the same file: 12,100 requests, 0 failures, no blocked checkpoint.
@@ -59,4 +60,4 @@ GitHub-hosted CI results are available through the branch/PR Actions checks. The
 
 ## Remaining operating limits
 
-Historical sources must remain immutable and available at their recorded paths. Every invocation re-hashes their contents; use one invocation for the large initial list. Replacing/removing layers, direct GDAL inputs, reprojection, polygon clipping, Windows and standalone executables remain unsupported. Eight-bit compositing and resampling round values; lossless encoding does not mean lossless downscaling. Publish only complete closed archives, avoid long WAL readers, use local SQLite-compatible storage and enforce any absolute memory cap at the OS level. Pilot representative real data before production.
+Historical sources must remain immutable and available at their recorded paths. Every invocation re-hashes their contents unless `--verify-recorded stat` is used; use one invocation for the large initial list. Replacing/removing layers, Windows and standalone executables remain unsupported; GDAL inputs, reprojection and polygon clipping belong to `mbmerge tile`, not to `merge`. Eight-bit compositing and resampling round values; lossless encoding does not mean lossless downscaling. Publish only complete closed archives, avoid long WAL readers, use local SQLite-compatible storage and enforce any absolute memory cap at the OS level. Pilot representative real data before production.
