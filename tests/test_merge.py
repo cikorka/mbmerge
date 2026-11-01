@@ -6,6 +6,7 @@ spawned workers; SIGKILL targets the process group so workers do not remain.
 512px demonstration checks and the larger RSS benchmark complement this suite.
 """
 import hashlib
+from contextlib import closing
 import io
 import json
 import os
@@ -47,18 +48,19 @@ def webp(im):
 
 def fixture(path, rows, metadata=None, indexed=True):
     """Build a standalone flat input; omitting its index creates a bad fixture."""
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as db:
         db.execute("CREATE TABLE tiles(zoom_level INTEGER,tile_column INTEGER,tile_row INTEGER,tile_data BLOB)")
         if indexed:
             db.execute("CREATE UNIQUE INDEX tile_index ON tiles(zoom_level,tile_column,tile_row)")
         db.executemany("INSERT INTO tiles VALUES(?,?,?,?)", rows)
         db.execute("CREATE TABLE metadata(name TEXT,value TEXT)")
         db.executemany("INSERT INTO metadata VALUES(?,?)", (metadata or {}).items())
+        db.commit()
 
 
 def all_tiles(path):
     """Materialize only small test archives for deterministic blob comparisons."""
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as db:
         return dict((tuple(r[:3]), r[3]) for r in db.execute("SELECT * FROM tiles ORDER BY 1,2,3"))
 
 
@@ -81,6 +83,7 @@ class MergeTests(unittest.TestCase):
     def cli(self, *extra, output=None, check=True):
         """Run a real CLI with tiny batches, preserving stderr for assertions."""
         cmd = [sys.executable, str(ROOT / "merge_mbtiles.py"), "merge",
+               "--mode", "overlay",
                "--output", str(output or self.out), "--tile-size", str(SIZE),
                "--workers", "2", "--max-inflight", "2", "--batch-size", "2", "--json-log"]
         proc = subprocess.run(cmd + list(map(str, extra)), capture_output=True, text=True, timeout=60)
@@ -259,7 +262,7 @@ class MergeTests(unittest.TestCase):
     def test_source_mutation_marks_tainted_and_blocks_resume(self):
         a = self.root / "a.mbtiles"
         fixture(a, [(2, x, 0, webp(image((x, 2, 3, 100)))) for x in range(4)])
-        args = m.parser().parse_args(["merge", "--output", str(self.out), "--input", str(a), "--tile-size", str(SIZE), "--workers", "1", "--batch-size", "1"])
+        args = m.parser().parse_args(["merge", "--mode", "overlay", "--output", str(self.out), "--input", str(a), "--tile-size", str(SIZE), "--workers", "1", "--batch-size", "1"])
         args.max_inflight = 1
         original = m.assert_static
         triggered = False
@@ -351,7 +354,7 @@ def crash(db):
         while True: time.sleep(1)
 if __name__ == "__main__":
     m._commit = crash
-    raise SystemExit(m.main(["merge", "--output", sys.argv[2], "--input", sys.argv[3], "--tile-size", "16", "--workers", "2", "--batch-size", "2", "--output-format", sys.argv[6]]))
+    raise SystemExit(m.main(["merge", "--mode", "overlay", "--output", sys.argv[2], "--input", sys.argv[3], "--tile-size", "16", "--workers", "2", "--batch-size", "2", "--output-format", sys.argv[6]]))
     ''', encoding="utf-8")
                     with (self.root / f"{mode}.log").open("w") as logfile:
                         proc = subprocess.Popen([sys.executable, str(driver), str(ROOT), str(out), str(b.resolve()), str(marker), mode, output_format],

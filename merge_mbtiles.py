@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
-"""Bounded, resumable raster MBTiles merger. See README.md for the contract."""
+"""Bounded, resumable lossless raster MBTiles merger and pyramid builder."""
 
 # Incrementally composite flat PNG/WebP MBTiles with bounded working data.
 #
-# Execution path: main -> merge -> import_source -> read_batch/bounded_results.
+# Execution path: main -> merge -> import_source -> build_pyramid.
+# Both image phases use byte-bounded reads and bounded_results backpressure.
 # Only the parent process owns SQLite connections. Spawned workers receive one
 # tile job at a time and return encoded bytes; they never access a database.
 #
@@ -14,10 +15,14 @@
 #    already committed translucent overlay changes its appearance.
 # 3. Bound both encoded bytes and submitted jobs: a row limit alone does not
 #    constrain image buffers, encoder results or executor queues.
+# 4. Commit dirty-key propagation with pixels. Rebuild parents from current
+#    children, highest dirty level first, and mark complete only after draining.
 #
 # Source snapshots and SHA-256 checks protect the history recorded in the output.
-# Changed sources cannot simply be overlaid again, because removed pixels would
-# survive. See ARCHITECTURE.md for the state machine and maintenance checklist;
+# A changed source is refused unless --reimport asks to overlay it again: that
+# is exact only for sources whose alpha is 0/255 and whose new version covers
+# the old one, because pixels removed from a source survive in the output.
+# See ARCHITECTURE.md for the state machine and maintenance checklist;
 # README.md documents supported formats, operational limits and CLI examples.
 from __future__ import annotations
 
@@ -41,14 +46,16 @@ import zlib
 
 # Program and on-disk schema versions are independent. Bump the schema when
 # older clients must refuse outputs they can no longer interpret safely.
-VERSION = "1.1.0"
-SCHEMA_VERSION = 2
+VERSION = "2.0.0"
+SCHEMA_VERSION = 3
 MIB = 1024 * 1024
 MERCATOR_LAT = 85.0511287798066
 KEY = "zoom_level,tile_column,tile_row"
 UPSERT = """INSERT INTO tiles VALUES (?,?,?,?)
  ON CONFLICT(zoom_level,tile_column,tile_row)
  DO UPDATE SET tile_data=excluded.tile_data"""
+# Stored TMS rows increase northwards; image rows increase downwards.
+CHILD_OFFSETS = ((0, 0), (1, 0), (0, 1), (1, 1))
 
 
 class MergeError(Exception):
@@ -83,8 +90,11 @@ def token(path):
 def assert_static(path, expected):
     """Reject replacement, edits or live journals at an import boundary."""
     try:
-        if token(path) != expected:
-            raise SourceChanged(f"Source changed while reading: {path}")
+        actual = token(path)
+        if actual != expected:
+            fields = ("device", "inode", "size", "mtime_ns", "ctime_ns")
+            changed = ",".join(name for name, old, new in zip(fields, expected, actual) if old != new)
+            raise SourceChanged(f"Source changed while reading ({changed}): {path}")
         for suffix in ("-wal", "-journal"):
             sidecar = Path(str(path) + suffix)
             if sidecar.exists() and sidecar.stat().st_size:
@@ -322,6 +332,22 @@ def image_format(data):
     raise MergeError("Tile must be a static WebP or PNG image")
 
 
+def lossless_webp(data):
+    """Inspect validated RIFF chunks, including extended WebP with a VP8L image.
+
+    A .webp suffix, an alpha channel or quality=100 does not imply lossless RGB.
+    Call only after decode() has validated the chunk structure and bitstream.
+    """
+    pos = 12
+    while pos < len(data):
+        kind = data[pos:pos + 4]
+        size = struct.unpack_from("<I", data, pos + 4)[0]
+        if kind in (b"VP8 ", b"VP8L"):
+            return kind == b"VP8L"
+        pos += 8 + size + (size & 1)
+    return False
+
+
 def decode(data, tile_size, max_blob, expected_format=None):
     """Validate one static tile and return an owned, fully loaded RGBA image.
 
@@ -362,22 +388,28 @@ def encode(im, output_format, method, png_compress_level, max_blob):
 
 
 def process_tile(job, tile_size, method, max_blob, output_format="webp",
-                 png_compress_level=6, source_format=None):
-    """Worker entry: (z,x,y,new_bytes,old_bytes_or_None) -> (z,x,y,result_bytes).
+                 png_compress_level=6, source_format=None, keep_empty=False):
+    """Worker entry: (z,x,y,new_bytes,old_bytes_or_None) -> (z,x,y,result_bytes_or_None).
 
     The existing output is the base; this source is the overlay. A unique tile
     can be copied only after validation and only in the selected output format.
     All other paths encode the same 8-bit RGBA compositing result losslessly.
+    A fully transparent overlay changes nothing; None tells the writer to skip
+    it (unless keep_empty stores a unique transparent tile as before).
     """
     from PIL import Image
     z, x, y, data, old = job
     try:
         with decode(data, tile_size, max_blob, source_format) as overlay:
+            if overlay.getchannel("A").getextrema()[1] == 0 and (old is not None or not keep_empty):
+                return z, x, y, None
             if old is None:
-                if image_format(data) == output_format:
+                if image_format(data) == output_format and (output_format == "png" or lossless_webp(data)):
                     return z, x, y, data  # validate; preserve bytes in the selected format
                 return z, x, y, encode(overlay, output_format, method, png_compress_level, max_blob)
             with decode(old, tile_size, max_blob, output_format) as base:
+                if output_format == "webp" and not lossless_webp(old):
+                    raise MergeError("Managed output contains lossy WebP; rebuild or restore it")
                 with Image.alpha_composite(base, overlay) as result:
                     return z, x, y, encode(result, output_format, method, png_compress_level, max_blob)
     except Exception as e:
@@ -391,7 +423,34 @@ def worker_init():
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
 
 
-def bounded_results(pool, jobs, args, metrics, source_format=None):
+def process_overview(job, tile_size, method, max_blob, output_format="webp",
+                     png_compress_level=6, source_format=None, keep_empty=False):
+    """Build one parent from four CURRENT children, never overlay an old parent.
+
+    BOX is a 2x2 area average without a filter halo, so four children suffice.
+    Premultiplied alpha prevents invisible RGB from bleeding into visible edges.
+    Work is bounded by one 2S x 2S canvas and the codec's temporary buffers.
+    """
+    from PIL import Image
+    z, x, y, children = job
+    try:
+        with Image.new("RGBA", (tile_size * 2, tile_size * 2)) as canvas:
+            for (dx, dy), data in zip(CHILD_OFFSETS, children):
+                if data is None:
+                    continue  # missing quadrant remains transparent, not black/opaque
+                with decode(data, tile_size, max_blob, output_format) as child:
+                    if output_format == "webp" and not lossless_webp(data):
+                        raise MergeError("Managed output contains lossy WebP")
+                    canvas.paste(child, (dx * tile_size, (1 - dy) * tile_size))
+            with canvas.convert("RGBa") as premultiplied:
+                with premultiplied.resize((tile_size, tile_size), Image.Resampling.BOX) as reduced:
+                    with reduced.convert("RGBA") as result:
+                        return z, x, y, encode(result, output_format, method, png_compress_level, max_blob)
+    except Exception as e:
+        raise MergeError(f"Overview {z}/{x}/{y}: {e}") from e
+
+
+def bounded_results(pool, jobs, args, metrics, source_format=None, worker=process_tile):
     """Yield unordered results while bounding all submitted/unconsumed futures.
 
     Jobs have distinct keys within one source, so completion order does not
@@ -405,9 +464,10 @@ def bounded_results(pool, jobs, args, metrics, source_format=None):
                 job = next(it)
             except StopIteration:
                 break
-            pending.add(pool.submit(process_tile, job, args.tile_size,
+            pending.add(pool.submit(worker, job, args.tile_size,
                                     args.webp_method, args.max_tile_mib * MIB,
-                                    args.output_format, args.png_compress_level, source_format))
+                                    args.output_format, args.png_compress_level, source_format,
+                                    getattr(args, "keep_empty", False)))
         metrics["peak_inflight"] = max(metrics["peak_inflight"], len(pending))
     try:
         fill()
@@ -456,19 +516,34 @@ def checkpoint(db):
         raise MergeError("WAL checkpoint blocked by another reader; close output readers and resume. Latest batch is committed.")
 
 
+def managed_objects(db):
+    """Inspect ownership/schema without changing pragmas or starting a writer."""
+    objects = {r[0] for r in db.execute("SELECT name FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'")}
+    if objects and "_merge_config" not in objects:
+        raise MergeError("Output is an unmanaged database. Use a NEW output and pass the old MBTiles as the first --input.")
+    if objects:
+        row = db.execute("SELECT version FROM _merge_config WHERE id=1").fetchone()
+        if not row or row[0] != SCHEMA_VERSION:
+            raise MergeError("Unsupported output schema version. Version 2 requires a NEW output; rebuild from original inputs. Existing archives are not modified.")
+    return objects
+
+
 def open_output(path, args):
     """Create/open a managed archive and resolve immutable encoding settings.
 
-    Never adopt arbitrary pre-existing tiles without an import ledger. Legacy
-    WebP settings are normalized in memory; migration becomes durable only in
-    update_metadata's transaction with its corresponding pixels/checkpoint.
-    This function resolves args.output_format for the worker pipeline.
+    Never adopt arbitrary pre-existing tiles or reinterpret a v1 ledger as a
+    pyramid. Resolve immutable mode, grid and encoding settings for the pipeline.
     """
+    # Even opening and closing an otherwise unused READ-WRITE WAL connection can
+    # checkpoint committed pages into the main file. Reject foreign/old archives
+    # through a read-only connection before ever requesting write access.
+    if path.exists():
+        with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True,
+                                     isolation_level=None, timeout=args.busy_timeout)) as probe:
+            managed_objects(probe)
     db = sqlite3.connect(path, isolation_level=None, timeout=args.busy_timeout)
     try:
-        objects = {r[0] for r in db.execute("SELECT name FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'")}
-        if objects and "_merge_config" not in objects:
-            raise MergeError("Output is an unmanaged database. Use a NEW output and pass the old MBTiles as the first --input.")
+        objects = managed_objects(db)  # recheck after reopening, under the CLI lock
         connection_limits(db, args.cache_mib, args.max_tile_mib * MIB)
         db.execute(f"PRAGMA busy_timeout={int(args.busy_timeout * 1000)}")
         if db.execute("PRAGMA journal_mode=WAL").fetchone()[0].lower() != "wal":
@@ -499,10 +574,19 @@ def open_output(path, args):
                   minzoom INTEGER, maxzoom INTEGER, west REAL, south REAL, east REAL, north REAL,
                   source_metadata TEXT NOT NULL, completed_at TEXT);
                 CREATE TABLE _merge_attributions(value TEXT PRIMARY KEY);
+                CREATE TABLE _merge_dirty(z INTEGER NOT NULL,x INTEGER NOT NULL,y INTEGER NOT NULL,
+                  PRIMARY KEY(z,x,y)) WITHOUT ROWID;
+                CREATE TABLE _merge_state(id INTEGER PRIMARY KEY CHECK(id=1),phase TEXT NOT NULL,
+                  overviews_written INTEGER NOT NULL DEFAULT 0);
+                INSERT INTO _merge_state(id,phase) VALUES(1,'empty');
             """)
             settings = {"tile_size": args.tile_size, "webp_method": args.webp_method,
                         "output_format": args.output_format or "webp",
                         "png_compress_level": args.png_compress_level,
+                        "mode": args.mode or "pyramid", "base_zoom": args.base_zoom,
+                        "min_zoom": args.min_zoom if args.min_zoom is not None else 0,
+                        "resampling": "box-premultiplied-alpha",
+                        "lossless": True,
                         "name": args.name or path.stem,
                         "description": args.description or "Incrementally composited raster tiles",
                         "type": args.type or "overlay"}
@@ -510,21 +594,31 @@ def open_output(path, args):
                        (SCHEMA_VERSION, json.dumps(settings)))
             _commit(db)
         row = db.execute("SELECT version,settings FROM _merge_config WHERE id=1").fetchone()
-        if not row or row[0] not in (1, SCHEMA_VERSION):
+        if not row or row[0] != SCHEMA_VERSION:
             raise MergeError("Unsupported output schema version")
         settings = json.loads(row[1])
-        # v1 outputs were always WebP. The next successful batch/final metadata
-        # commit upgrades the ledger to v2, which old CLI versions refuse to open.
-        if row[0] == 1:
-            if settings.get("output_format", "webp") != "webp":
-                raise MergeError("Invalid legacy output format")
-            settings.setdefault("output_format", "webp")
-            settings.setdefault("png_compress_level", 6)
         if settings.get("output_format") not in ("webp", "png"):
             raise MergeError("Invalid output format in configuration")
         if args.output_format is not None and args.output_format != settings["output_format"]:
             raise MergeError(f"Resume requires the original --output-format={settings['output_format']}; choose a NEW output to convert formats")
         args.output_format = settings["output_format"]
+        if (settings.get("mode") not in ("pyramid", "overlay") or settings.get("lossless") is not True
+                or settings.get("resampling") != "box-premultiplied-alpha"):
+            raise MergeError("Invalid mode/lossless configuration")
+        pristine = (db.execute("SELECT phase FROM _merge_state WHERE id=1").fetchone()[0] == "empty"
+                    and not db.execute("SELECT 1 FROM _merge_sources LIMIT 1").fetchone())
+        for k in ("mode", "base_zoom", "min_zoom"):
+            requested = getattr(args, k)
+            if requested is not None and requested != settings[k]:
+                if pristine:
+                    settings[k] = requested  # a rejected plan has imported no pixels
+                else:
+                    raise MergeError(f"Resume requires the original --{k.replace('_', '-')}={settings[k]}")
+            setattr(args, k, settings[k])
+        if args.mode == "overlay" and (args.base_zoom is not None or args.min_zoom != 0):
+            raise MergeError("--base-zoom/--min-zoom apply only to pyramid mode")
+        if args.mode == "pyramid" and args.batch_mib < 5 * args.max_tile_mib:
+            raise MergeError("Pyramid --batch-mib must be >= 5 * --max-tile-mib (four children + parent)")
         frozen = ("tile_size", "webp_method" if args.output_format == "webp" else "png_compress_level")
         for k in frozen:
             if settings[k] != getattr(args, k):
@@ -533,6 +627,7 @@ def open_output(path, args):
             if getattr(args, k) is not None:
                 settings[k] = getattr(args, k)
         db.execute("CREATE TEMP TABLE batch_keys(z INTEGER,x INTEGER,y INTEGER,PRIMARY KEY(z,x,y)) WITHOUT ROWID")
+        db.execute("CREATE TEMP TABLE child_keys(z INTEGER,x INTEGER,y INTEGER,PRIMARY KEY(z,x,y)) WITHOUT ROWID")
         checkpoint(db)
         return db, settings
     except BaseException:
@@ -548,10 +643,17 @@ def update_metadata(db, settings):
     a source's full declared extent before that source has completed importing.
     """
     # Scan only the small source ledger, never the TB-sized tiles table.
-    z0, z1, w, s, e, n = db.execute("""SELECT min(minzoom),max(maxzoom),min(west),min(south),
+    w, s, e, n = db.execute("""SELECT min(west),min(south),
         max(east),max(north) FROM _merge_sources WHERE tile_count>0""").fetchone()
+    # The primary key starts with zoom, so these extrema are index end-point
+    # lookups, not scans over every tile. Include only actually committed levels.
+    low = db.execute("SELECT zoom_level FROM tiles ORDER BY zoom_level LIMIT 1").fetchone()
+    high = db.execute("SELECT zoom_level FROM tiles ORDER BY zoom_level DESC LIMIT 1").fetchone()
+    z0, z1 = (low[0], high[0]) if low else (None, None)
+    phase = db.execute("SELECT phase FROM _merge_state WHERE id=1").fetchone()[0]
     meta = {"name": settings["name"], "description": settings["description"],
-            "type": settings["type"], "version": "1.3", "format": settings["output_format"], "scheme": "tms"}
+            "type": settings["type"], "version": "1.3", "format": settings["output_format"], "scheme": "tms",
+            "mbmerge:phase": phase, "mbmerge:mode": settings["mode"]}
     if z0 is not None:
         def fmt(v):
             return f"{v:.10f}".rstrip("0").rstrip(".") or "0"
@@ -578,8 +680,22 @@ def read_batch(src, db, last, args, source_format=None):
     Select the prefix fitting the budget BEFORE loading any image blobs. The
     temporary key table is bounded by batch_size and uses this same writer.
     """
-    where = "" if last is None else f"WHERE ({KEY}) > (?,?,?)"
-    params = () if last is None else tuple(last)
+    clauses, params = [], ()
+    if args.mode == "pyramid":
+        clauses.append("zoom_level=?")
+        params += (args.base_zoom,)
+        if last is not None:
+            if last[0] != args.base_zoom:
+                raise MergeError("Invalid base-zoom resume cursor")
+            # With an equality prefix, compare only the remaining index columns.
+            # Including zoom again makes SQLite seek by zoom alone and scan all
+            # earlier x/y rows on every batch, becoming quadratic on big inputs.
+            clauses.append("(tile_column,tile_row) > (?,?)")
+            params += tuple(last[1:])
+    elif last is not None:
+        clauses.append(f"({KEY}) > (?,?,?)")
+        params += tuple(last)
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
     candidates = src.execute(f"SELECT {KEY},length(tile_data),typeof(tile_data) FROM tiles {where} ORDER BY {KEY} LIMIT ?",
                              params + (args.batch_size,)).fetchall()
     if not candidates:
@@ -603,10 +719,9 @@ def read_batch(src, db, last, args, source_format=None):
         old_size = old_sizes.get((z, x, y), 0)
         if old_size > max_blob:
             raise MergeError("Existing output tile exceeds --max-tile-mib")
-        # Reserve the full output limit for overlaps and possible transcoding.
-        # A declared matching source format is verified by the worker, so unique
-        # matching tiles are byte copies and need only their original length.
-        output_size = size if not old_size and source_format == args.output_format else max_blob
+        # WebP metadata does not declare lossless/lossy RGB. Even a unique WebP
+        # may require lossless transcoding, so budget its worst-case result.
+        output_size = size if not old_size and source_format == args.output_format == "png" else max_blob
         cost = size + old_size + output_size
         if size_sum + cost > args.batch_mib * MIB:
             break
@@ -627,22 +742,249 @@ def read_batch(src, db, last, args, source_format=None):
     return jobs, size_sum
 
 
-def preflight(db, args):
+def prepare_sources(db, paths, args, settings):
+    """Resolve one common base level before committing any source pixels.
+
+    Automatic selection requires equal actual maxima, not metadata maxzoom.
+    Explicit selection allows an intentional common level present in all inputs.
+    Open only one input at a time; file/zoom descriptors are tiny, not tile data.
+    """
+    if args.mode != "pyramid":
+        return
+    maxima = []
+    for path in paths:
+        with source(path, args) as (src, stamp):
+            validate_schema(src, path)
+            read_metadata(src)
+            low = src.execute("SELECT zoom_level FROM tiles ORDER BY zoom_level LIMIT 1").fetchone()
+            high = src.execute("SELECT zoom_level FROM tiles ORDER BY zoom_level DESC LIMIT 1").fetchone()
+            if high:
+                if any(type(r[0]) is not int or not 0 <= r[0] <= 30 for r in (low, high)):
+                    raise MergeError(f"Invalid source zoom range: {path}")
+                maxima.append((path, high[0]))
+                if args.base_zoom is not None and not src.execute(
+                        "SELECT 1 FROM tiles WHERE zoom_level=? LIMIT 1", (args.base_zoom,)).fetchone():
+                    raise MergeError(f"Input has no tiles at base zoom {args.base_zoom}: {path}")
+            assert_static(path, stamp)
+    if args.base_zoom is None:
+        levels = {z for _, z in maxima}
+        if not levels:
+            raise MergeError("No nonempty input to determine --base-zoom; specify it explicitly for an empty pyramid")
+        if len(levels) != 1:
+            raise MergeError("Inputs have different highest zooms. Choose an explicit common --base-zoom present in every nonempty input; no sources are silently dropped or upscaled.")
+        args.base_zoom = levels.pop()
+    if args.min_zoom > args.base_zoom:
+        raise MergeError("--min-zoom must be <= --base-zoom")
+    # Inferred equal maxima necessarily exist in every nonempty input. Explicit
+    # levels were checked above. Recheck in import_source's locked snapshot too.
+    settings["base_zoom"] = args.base_zoom
+    db.execute("BEGIN IMMEDIATE")
+    db.execute("UPDATE _merge_config SET settings=? WHERE id=1", (json.dumps(settings),))
+    _commit(db)
+    checkpoint(db)
+
+
+def mark_parents(db, keys, min_zoom):
+    """Persist deduplicated immediate parents in the SAME transaction as pixels.
+
+    Do not accumulate the full dirty set in Python. Higher ancestors are queued
+    when their children are regenerated, which also gives crash-safe ordering.
+    """
+    db.executemany("INSERT OR IGNORE INTO _merge_dirty VALUES(?,?,?)",
+                   ((z - 1, x // 2, y // 2) for z, x, y in keys if z > min_zoom))
+
+
+def read_overview_batch(db, args):
+    """Read a bounded prefix of the highest dirty level, then its child blobs.
+
+    Length lookups precede blob reads. The temporary child key table has at
+    most four times batch_size rows, and joins probe the tiles primary key.
+    """
+    top = db.execute("SELECT z FROM _merge_dirty ORDER BY z DESC LIMIT 1").fetchone()
+    if not top:
+        return [], 0
+    z = top[0]
+    keys = db.execute("SELECT z,x,y FROM _merge_dirty WHERE z=? ORDER BY x,y LIMIT ?",
+                      (z, args.batch_size)).fetchall()
+    def children(parent_keys):
+        return ((tz + 1, 2 * x + dx, 2 * y + dy)
+                for tz, x, y in parent_keys for dx, dy in CHILD_OFFSETS)
+    db.execute("DELETE FROM child_keys")
+    db.executemany("INSERT INTO child_keys VALUES(?,?,?)", children(keys))
+    sizes = {}
+    for tz, x, y, size, kind in db.execute("""SELECT k.z,k.x,k.y,length(t.tile_data),typeof(t.tile_data)
+        FROM child_keys k CROSS JOIN tiles t
+        WHERE t.zoom_level=k.z AND t.tile_column=k.x AND t.tile_row=k.y"""):
+        if kind != "blob" or not 0 < size <= args.max_tile_mib * MIB:
+            raise MergeError(f"Invalid/oversized child at {tz}/{x}/{y}")
+        sizes[(tz, x, y)] = size
+    chosen, budget = [], 0
+    for key in keys:
+        cost = args.max_tile_mib * MIB + sum(sizes.get(k, 0) for k in children([key]))
+        if budget + cost > args.batch_mib * MIB:
+            break
+        chosen.append(key)
+        budget += cost
+    if not chosen:
+        raise MergeError("Overview batch byte budget too small for four children + parent")
+    db.execute("DELETE FROM child_keys")
+    db.executemany("INSERT INTO child_keys VALUES(?,?,?)", children(chosen))
+    blobs = {(tz, x, y): data for tz, x, y, data in db.execute("""SELECT k.z,k.x,k.y,t.tile_data
+        FROM child_keys k CROSS JOIN tiles t
+        WHERE t.zoom_level=k.z AND t.tile_column=k.x AND t.tile_row=k.y""")}
+    jobs = [(tz, x, y, tuple(blobs.get(k) for k in children([(tz, x, y)]))) for tz, x, y in chosen]
+    return jobs, budget
+
+
+def build_pyramid(db, pool, args, settings, metrics):
+    """Regenerate dirty parents bottom-up; each batch is an atomic checkpoint.
+
+    A crash before commit retains the current dirty keys. A crash after commit
+    retains their pixels AND queued ancestors. An old parent is never an input.
+    Additional base imports can safely extend a partially generated pyramid.
+    """
+    db.execute("BEGIN IMMEDIATE")
+    db.execute("UPDATE _merge_state SET phase='building' WHERE id=1")
+    update_metadata(db, settings)
+    _commit(db)
+    checkpoint(db)
+    last_log = 0.0
+    while True:
+        jobs, budget = read_overview_batch(db, args)
+        if not jobs:
+            break
+        metrics["peak_batch_bytes"] = max(metrics["peak_batch_bytes"], budget)
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            rows, row_bytes = [], 0
+            results = bounded_results(pool, jobs, args, metrics, worker=process_overview)
+            try:
+                for result in results:
+                    size = len(result[3])
+                    if rows and (len(rows) >= args.sql_batch_size or row_bytes + size > args.sql_batch_mib * MIB):
+                        db.executemany(UPSERT, rows)
+                        rows.clear()
+                        row_bytes = 0
+                    rows.append(result)
+                    row_bytes += size
+                if rows:
+                    db.executemany(UPSERT, rows)
+            finally:
+                results.close()
+            keys = [job[:3] for job in jobs]
+            mark_parents(db, keys, args.min_zoom)
+            db.executemany("DELETE FROM _merge_dirty WHERE z=? AND x=? AND y=?", keys)
+            db.execute("UPDATE _merge_state SET overviews_written=overviews_written+? WHERE id=1", (len(keys),))
+            update_metadata(db, settings)
+            _commit(db)
+            checkpoint(db)
+            metrics["overview_tiles"] += len(jobs)
+            metrics["overview_batches"] += 1
+            if time.monotonic() - last_log >= args.log_interval:
+                log(args, "overviews", zoom=jobs[0][0], written=metrics["overview_tiles"], batch_bytes=budget,
+                    peak_inflight=metrics["peak_inflight"])
+                last_log = time.monotonic()
+            del jobs, rows, result, results, keys
+        except BaseException:
+            db.rollback()
+            raise
+
+
+def recorded_state(path, expected_sha, fingerprint, args):
+    """Return (unchanged, stamp, sha) for a recorded source.
+
+    --verify-recorded stat trusts an identical stat fingerprint (device, inode,
+    size, mtime, ctime) and hashes only when it differs, so a touched but
+    byte-identical file is still recognized as unchanged. sha is None when the
+    stat shortcut avoided hashing.
+    """
+    with source(path, args) as (src, stamp):
+        if args.verify_recorded == "stat" and json.loads(fingerprint) == list(stamp):
+            return True, stamp, None
+        actual = digest(path, stamp)
+        return actual == expected_sha, stamp, actual
+
+
+def preflight(db, args, listed=()):
     """Recheck every historical contribution before importing anything new.
 
     A hash mismatch here leaves the output untainted: restoring the original
     source is sufficient. A change DURING import has different safety semantics.
+    Sources listed in this run under --reimport are decided by plan_reimports.
     """
     # Validate every previous contribution, including paths omitted from this run.
-    for path_s, expected, state in db.execute("SELECT path,sha256,status FROM _merge_sources ORDER BY seq"):
+    rows = db.execute("SELECT path,sha256,fingerprint,status FROM _merge_sources ORDER BY seq").fetchall()
+    for path_s, expected, fingerprint, state in rows:
         if state == "tainted":
             raise MergeError(f"Output was tainted by an input changing during import: {path_s}. Rebuild to a new output.")
+        if args.reimport != "never" and path_s in listed:
+            continue
         path = Path(path_s)
-        log(args, "verify_source", path=path)
-        with source(path, args) as (src, stamp):
-            actual = digest(path, stamp)
-            if actual != expected:
-                raise MergeError(f"Changed imported input: {path}. Restore the original exact bytes or rebuild to a NEW output; overlay replacement is unsafe.")
+        log(args, "verify_source", path=path, method=args.verify_recorded)
+        unchanged, stamp, actual = recorded_state(path, expected, fingerprint, args)
+        if not unchanged:
+            hint = (" List it with --reimport changed to overlay the new version," if args.reimport == "never" else
+                    " List it in this run to overlay the new version,")
+            raise MergeError(f"Changed imported input: {path}.{hint} restore the original exact bytes, or rebuild to a NEW output.")
+        if actual is not None and json.loads(fingerprint) != list(stamp):
+            remember_fingerprint(db, path_s, stamp)
+
+
+def remember_fingerprint(db, path_s, stamp):
+    """Record the current stat of a byte-identical source so stat checks pass."""
+    db.execute("BEGIN IMMEDIATE")
+    db.execute("UPDATE _merge_sources SET fingerprint=? WHERE path=?", (json.dumps(stamp), path_s))
+    _commit(db)
+    checkpoint(db)
+
+
+def plan_reimports(db, args, paths):
+    """Select listed, completely imported sources to overlay again.
+
+    changed: only sources whose content differs from the recorded hash.
+    always:  every listed source. Active (interrupted) sources always resume.
+    """
+    if args.reimport == "never":
+        return set()
+    recorded = {p: (sha, fp) for p, sha, fp in db.execute(
+        "SELECT path,sha256,fingerprint FROM _merge_sources WHERE status='complete'")}
+    chosen = set()
+    for path in paths:
+        if str(path) not in recorded:
+            continue
+        if args.reimport == "always":
+            chosen.add(str(path))
+            continue
+        sha, fingerprint = recorded[str(path)]
+        log(args, "verify_source", path=path, method=args.verify_recorded)
+        unchanged, stamp, actual = recorded_state(path, sha, fingerprint, args)
+        if not unchanged:
+            chosen.add(str(path))
+        elif actual is not None and json.loads(fingerprint) != list(stamp):
+            remember_fingerprint(db, str(path), stamp)
+    return chosen
+
+
+def reset_for_reimport(db, path, args, settings):
+    """Turn a complete source back into an active one at its first tile.
+
+    The recorded hash/fingerprint switch to the current file in the same
+    transaction, so a crash afterwards resumes this source exactly like any
+    other interrupted import. Extents and zooms keep their union: tiles of the
+    previous version remain in the output.
+    """
+    with source(path, args) as (src, stamp):
+        sha = digest(path, stamp)
+        meta = read_metadata(src)
+    db.execute("BEGIN IMMEDIATE")
+    db.execute("""UPDATE _merge_sources SET status='active',sha256=?,fingerprint=?,source_metadata=?,
+        last_z=NULL,last_x=NULL,last_y=NULL,completed_at=NULL WHERE path=?""",
+               (sha, json.dumps(stamp), json.dumps(meta), str(path)))
+    db.execute("UPDATE _merge_state SET phase='importing' WHERE id=1")
+    update_metadata(db, settings)
+    _commit(db)
+    checkpoint(db)
+    log(args, "reimport", path=path)
 
 
 def import_source(db, pool, path, args, settings, metrics):
@@ -654,6 +996,9 @@ def import_source(db, pool, path, args, settings, metrics):
     with source(path, args) as (src, stamp):
         validate_schema(src, path)
         meta = read_metadata(src)
+        if args.mode == "pyramid" and src.execute("SELECT 1 FROM tiles LIMIT 1").fetchone():
+            if not src.execute("SELECT 1 FROM tiles WHERE zoom_level=? LIMIT 1", (args.base_zoom,)).fetchone():
+                raise MergeError(f"Input has no tiles at base zoom {args.base_zoom}: {path}")
         bounds = parse_bounds(meta.get("bounds"))
         if bounds is None:
             log(args, "bounds_fallback", path=path, reason="missing/invalid bounds; using whole TMS tile extents")
@@ -661,7 +1006,7 @@ def import_source(db, pool, path, args, settings, metrics):
         row = db.execute("SELECT seq,sha256,status,last_z,last_x,last_y,tile_count,overlaps,minzoom,maxzoom,west,south,east,north FROM _merge_sources WHERE path=?", (str(path),)).fetchone()
         if row:
             if row[1] != sha or row[2] == "tainted":
-                raise MergeError(f"Changed/tainted input {path}; rebuild to a NEW output")
+                raise MergeError(f"Changed/tainted input {path}; use --reimport changed or rebuild to a NEW output")
             if row[2] == "complete":
                 return
         else:
@@ -670,6 +1015,8 @@ def import_source(db, pool, path, args, settings, metrics):
             db.execute("BEGIN IMMEDIATE")
             seq = db.execute("INSERT INTO _merge_sources(path,sha256,fingerprint,status,source_metadata) VALUES(?,?,?,'active',?)",
                              (str(path), sha, json.dumps(stamp), json.dumps(meta))).lastrowid
+            db.execute("UPDATE _merge_state SET phase='importing' WHERE id=1")
+            update_metadata(db, settings)
             _commit(db)
             checkpoint(db)
             row = (seq, sha, "active", None, None, None, 0, 0, None, None, None, None, None, None)
@@ -697,19 +1044,25 @@ def import_source(db, pool, path, args, settings, metrics):
                 # From here through _commit, output pixels, source position and
                 # metadata are inseparable. Worker/SQL failures roll all back.
                 db.execute("BEGIN IMMEDIATE")
-                sql_rows, sql_bytes = [], 0
+                db.execute("UPDATE _merge_state SET phase='importing' WHERE id=1")
+                sql_rows, sql_bytes, written = [], 0, []
                 results = bounded_results(pool, jobs, args, metrics, meta.get("format"))
                 try:
                     for result in results:
+                        if result[3] is None:
+                            metrics["empty_skipped"] += 1
+                            continue
                         size = len(result[3])
                         if sql_rows and (len(sql_rows) >= args.sql_batch_size or sql_bytes + size > args.sql_batch_mib * MIB):
                             db.executemany(UPSERT, sql_rows)
+                            written.extend(r[:3] for r in sql_rows)
                             sql_rows.clear()
                             sql_bytes = 0
                         sql_rows.append(result)
                         sql_bytes += size
                     if sql_rows:
                         db.executemany(UPSERT, sql_rows)
+                        written.extend(r[:3] for r in sql_rows)
                 finally:
                     results.close()
                 # Check again after CPU work, before making any new pixels
@@ -723,6 +1076,8 @@ def import_source(db, pool, path, args, settings, metrics):
                            (*last, count, overlaps, minz, maxz, *extent, seq))
                 if meta.get("attribution"):
                     db.execute("INSERT OR IGNORE INTO _merge_attributions VALUES(?)", (meta["attribution"],))
+                if args.mode == "pyramid":
+                    mark_parents(db, written, args.min_zoom)
                 update_metadata(db, settings)
                 _commit(db)  # pixels + keyset + metadata, atomically
                 checkpoint(db)  # stop if readers prevent bounded WAL reuse
@@ -732,7 +1087,7 @@ def import_source(db, pool, path, args, settings, metrics):
                         batch_bytes=budget, peak_inflight=metrics["peak_inflight"])
                     last_log = time.monotonic()
                 # Do not retain the previous batch while loading the next one.
-                del jobs, sql_rows, result, results
+                del jobs, sql_rows, results, written
             # Detect out-of-band edits with restored size/mtime as well.
             if digest(path, stamp) != sha:
                 raise SourceChanged(f"Source content changed during import: {path}")
@@ -788,7 +1143,8 @@ def merge(args):
     if not output.parent.is_dir():
         raise MergeError(f"Output directory does not exist: {output.parent}")
     paths = collect_inputs(args, output)
-    metrics = {"batches": 0, "peak_inflight": 0, "peak_batch_bytes": 0}
+    metrics = {"batches": 0, "peak_inflight": 0, "peak_batch_bytes": 0,
+               "overview_tiles": 0, "overview_batches": 0, "empty_skipped": 0, "reimported": 0}
     start = time.monotonic()
     with output_lock(output):
         if output.exists() and output.stat().st_nlink != 1:
@@ -799,25 +1155,41 @@ def merge(args):
                 from PIL import features
                 if not features.check("webp"):
                     raise MergeError("Pillow has no WebP support; use --output-format png for PNG-only work")
-            preflight(db, args)
+            listed = {str(p) for p in paths}
+            preflight(db, args, listed)
             prior = dict(db.execute("SELECT path,status FROM _merge_sources ORDER BY seq"))
             prior_identities = {token(Path(p))[:2]: p for p in prior}
             for path in paths:
                 alias = prior_identities.get(token(path)[:2])
                 if alias is not None and alias != str(path):
                     raise MergeError(f"New input aliases an already imported physical file: {alias}")
+            reimports = plan_reimports(db, args, paths)
             # A partially imported source always finishes before any new overlay.
             active = [Path(p) for p, state in prior.items() if state == "active"]
-            todo = active + [p for p in paths if str(p) not in prior]
-            log(args, "plan", new_or_active=len(todo), skipped=sum(prior.get(str(p)) == "complete" for p in paths), workers=args.workers)
+            todo = active + [p for p in paths
+                             if (str(p) not in prior or str(p) in reimports) and p not in active]
             if not paths and not active and not prior:
                 raise MergeError("No inputs found")
-            if todo:
+            prepare_sources(db, todo, args, settings)
+            log(args, "plan", mode=args.mode, base_zoom=args.base_zoom, min_zoom=args.min_zoom,
+                new_or_active=len(todo) - len(reimports), reimport=len(reimports),
+                skipped=sum(prior.get(str(p)) == "complete" and str(p) not in reimports for p in paths),
+                workers=args.workers)
+            dirty = db.execute("SELECT 1 FROM _merge_dirty LIMIT 1").fetchone()
+            if todo or dirty:
                 with ProcessPoolExecutor(max_workers=args.workers,
                         mp_context=multiprocessing.get_context("spawn"), initializer=worker_init) as pool:
                     for path in todo:
+                        if str(path) in reimports:
+                            # Reset just before importing: after a crash the source is
+                            # active and resumes first, never overlaid twice.
+                            reset_for_reimport(db, path, args, settings)
+                            metrics["reimported"] += 1
                         import_source(db, pool, path, args, settings, metrics)
+                    if args.mode == "pyramid":
+                        build_pyramid(db, pool, args, settings, metrics)
             db.execute("BEGIN IMMEDIATE")
+            db.execute("UPDATE _merge_state SET phase='complete' WHERE id=1")
             update_metadata(db, settings)
             _commit(db)
             checkpoint(db)
@@ -842,6 +1214,10 @@ def status(args):
     """Report the small ledger and metadata without scanning all tile blobs."""
     with closing(readonly_output(args.output)) as db:
         result = {"schema_version": db.execute("SELECT version FROM _merge_config WHERE id=1").fetchone()[0],
+                  "settings": json.loads(db.execute("SELECT settings FROM _merge_config WHERE id=1").fetchone()[0]),
+                  "phase": db.execute("SELECT phase FROM _merge_state WHERE id=1").fetchone()[0],
+                  "pending_parents": db.execute("SELECT count(*) FROM _merge_dirty").fetchone()[0],
+                  "overviews_written": db.execute("SELECT overviews_written FROM _merge_state WHERE id=1").fetchone()[0],
                   "sources": dict(db.execute("SELECT status,count(*) FROM _merge_sources GROUP BY status")),
                   "contributions": db.execute("SELECT coalesce(sum(tile_count),0) FROM _merge_sources").fetchone()[0],
                   "metadata": dict(db.execute("SELECT name,value FROM metadata")),
@@ -862,6 +1238,11 @@ def verify(args):
         tainted = db.execute("SELECT count(*) FROM _merge_sources WHERE status='tainted'").fetchone()[0]
         if tainted:
             raise MergeError("Output is tainted; rebuild it")
+        unfinished = db.execute("SELECT count(*) FROM _merge_sources WHERE status!='complete'").fetchone()[0]
+        dirty = db.execute("SELECT 1 FROM _merge_dirty LIMIT 1").fetchone()
+        phase = db.execute("SELECT phase FROM _merge_state WHERE id=1").fetchone()[0]
+        if unfinished or dirty or phase != "complete":
+            raise MergeError("Output is incomplete (source import or pyramid pending); resume merge before verification")
         checked = 0
         if args.decode:
             settings = json.loads(db.execute("SELECT settings FROM _merge_config WHERE id=1").fetchone()[0])
@@ -871,9 +1252,11 @@ def verify(args):
             for z, x, y, data in db.execute(f"SELECT {KEY},tile_data FROM tiles"):
                 with decode(data, settings["tile_size"], args.max_tile_mib * MIB,
                             settings.get("output_format", "webp")):
+                    if settings["output_format"] == "webp" and not lossless_webp(data):
+                        raise MergeError(f"Lossy WebP in managed output at {z}/{x}/{y}")
                     checked += 1
-        unfinished = db.execute("SELECT count(*) FROM _merge_sources WHERE status!='complete'").fetchone()[0]
         print(json.dumps({"sqlite": "ok", "decoded_tiles": checked, "unfinished_sources": unfinished,
+                          "phase": phase,
                           "note": "Does not recheck source fingerprints; merge does that before resuming."}))
 
 
@@ -890,7 +1273,7 @@ def parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--version", action="version", version=VERSION)
     sub = p.add_subparsers(dest="command", required=True)
-    m = sub.add_parser("merge", help="append inputs or resume; later inputs overlay earlier ones")
+    m = sub.add_parser("merge", help="merge the base zoom and build overviews; append or resume safely")
     m.add_argument("--output", required=True)
     m.add_argument("--output-format", choices=("webp", "png"),
                    help="new output: webp by default; existing output: use its recorded format")
@@ -898,9 +1281,15 @@ def parser():
     m.add_argument("--input-dir")
     m.add_argument("--pattern", default="*.mbtiles", help="glob within input-dir; ** supported")
     m.add_argument("--input-list", help="UTF-8 paths, one per line; appended after --input")
+    m.add_argument("--mode", choices=("pyramid", "overlay"),
+                   help="new outputs: pyramid by default; overlay preserves every supplied zoom; existing outputs infer their mode")
+    m.add_argument("--base-zoom", type=int, choices=range(31), metavar="Z",
+                   help="common source level; default: equal actual highest zooms; fixed on resume")
+    m.add_argument("--min-zoom", type=int, choices=range(31), metavar="Z",
+                   help="lowest generated level, default 0; fixed on resume")
     m.add_argument("--workers", type=positive, default=min(4, os.cpu_count() or 1))
     m.add_argument("--max-inflight", type=positive, help="default: 2 * workers")
-    m.add_argument("--batch-size", type=positive, default=128, help="max source keys per transaction")
+    m.add_argument("--batch-size", type=positive, default=128, help="max source keys or overview parents per transaction")
     m.add_argument("--batch-mib", type=positive, default=32, help="encoded input + old + worst-case output byte budget")
     m.add_argument("--max-tile-mib", type=positive, default=4)
     m.add_argument("--sql-batch-size", type=positive, default=16)
@@ -917,6 +1306,14 @@ def parser():
     m.add_argument("--description")
     m.add_argument("--type", choices=("overlay", "baselayer"))
     m.add_argument("--json-log", action="store_true")
+    m.add_argument("--reimport", choices=("never", "changed", "always"), default="never",
+                   help="listed, already imported sources: never (default; changed ones are refused), "
+                        "changed (overlay a new version again) or always (overlay again even if unchanged)")
+    m.add_argument("--verify-recorded", choices=("sha256", "stat"), default="sha256",
+                   help="how recorded sources are checked each run: full SHA-256 (default) or stat "
+                        "fingerprint first, hashing only files whose stat changed")
+    m.add_argument("--keep-empty", action="store_true",
+                   help="store unique fully transparent tiles instead of skipping them")
     m.set_defaults(func=merge)
     s = sub.add_parser("status", help="small ledger/metadata summary, no tile scan")
     s.add_argument("--output", required=True)
@@ -927,6 +1324,9 @@ def parser():
     v.add_argument("--decode", action="store_true")
     v.add_argument("--max-tile-mib", type=positive, default=4)
     v.set_defaults(func=verify)
+    # Imported here: tile_mbtiles reuses helpers from this module.
+    from tile_mbtiles import add_parser as add_tile_parser
+    add_tile_parser(sub, positive)
     return p
 
 
@@ -938,8 +1338,11 @@ def main(argv=None):
     if sqlite3.sqlite_version_info < (3, 35, 0):
         print("SQLite >= 3.35 is required", file=sys.stderr)
         return 2
+    from tile_mbtiles import TileError
     p = parser()
     args = p.parse_args(argv)
+    if args.command == "tile" and args.tile_size > 4096:
+        p.error("--tile-size must be <= 4096")
     if args.command == "merge":
         args.max_inflight = args.max_inflight or args.workers * 2
         if args.tile_size > 4096:
@@ -957,7 +1360,7 @@ def main(argv=None):
     except KeyboardInterrupt:
         print("Interrupted; rerun the same merge command to resume.", file=sys.stderr)
         return 130
-    except (MergeError, sqlite3.Error, OSError, ValueError, ImportError, BrokenProcessPool) as e:
+    except (MergeError, TileError, sqlite3.Error, OSError, ValueError, ImportError, BrokenProcessPool) as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
     finally:

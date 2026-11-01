@@ -70,7 +70,7 @@ def check_archives(root, dist_dir, tag=""):
         ensure(len(metadata) == 1, "Wheel must contain exactly one METADATA file")
         check_metadata(wheel.read(metadata[0]), name, version)
         modules = {n for n in names if ".dist-info/" not in n and not n.endswith("/")}
-        ensure(modules == {"merge_mbtiles.py", "mbmerge.py"}, "Unexpected wheel modules/data")
+        ensure(modules == {"merge_mbtiles.py", "tile_mbtiles.py", "mbmerge.py"}, "Unexpected wheel modules/data")
         entry_file = metadata[0].rsplit("/", 1)[0] + "/entry_points.txt"
         ensure("mbmerge = merge_mbtiles:main" in wheel.read(entry_file).decode(), "mbmerge entry point is missing")
         ensure(any(n.endswith("/licenses/LICENSE.md") for n in names), "MIT license missing from wheel")

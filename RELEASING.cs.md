@@ -8,13 +8,13 @@ Balíček, repozitář i příkaz se jmenují **mbmerge**. GitHub Packages můž
 
 Jediným zdrojem verze je `VERSION` v [merge_mbtiles.py](merge_mbtiles.py). Setuptools načte stejnou hodnotu do wheelu a zdrojového archivu, CLI ji vypíše a `mbmerge.__version__` ji zpřístupní v Pythonu. Nedopisuj další kopii do pyproject.toml. Databázové `SCHEMA_VERSION` je nezávislé číslo s pravidly z [ARCHITECTURE.cs.md](ARCHITECTURE.cs.md).
 
-První veřejná verze může být `1.1.0`; předchozí pracovní verze nemusely mít veřejný release. Používej tagy `v1.1.0`, `v1.1.1` atd. Publikované vydání ani jeho tag nepřepisuj. Změny vydávej pod novým číslem.
+Tento checkout připravuje `2.0.0`, zásadní změnu proti slučovači dodaných zoomů verze 1.x. Používej tagy `v2.0.0`, `v2.0.1` atd. Publikované vydání ani jeho tag nepřepisuj. Změny vydávej pod novým číslem. Úprava checkoutu ani push větve samy release nevytvářejí.
 
-- Patch, například `1.1.1`: kompatibilní opravy.
-- Minor, například `1.2.0`: kompatibilní nové funkce.
-- Major, například `2.0.0`: nekompatibilní změny veřejného CLI či datového kontraktu.
+- Patch, například `2.0.1`: kompatibilní opravy.
+- Minor, například `2.1.0`: kompatibilní nové funkce.
+- Major, například `3.0.0` po verzi 2: nekompatibilní změny veřejného CLI či datového kontraktu.
 
-Python prerelease má tvar například `1.2.0rc1`, odpovídající tag je `v1.2.0rc1`. Na GitHubu ho označ jako prerelease. Produkční workflow prerelease přeskočí a odmítne jiný tvar než X.Y.Z, i kdyby byl náhled omylem označen jako stabilní. Zkušební publikování lze provést na odděleném TestPyPI.
+Python prerelease má tvar například `2.1.0rc1`, odpovídající tag je `v2.1.0rc1`. Na GitHubu ho označ jako prerelease. Produkční workflow prerelease přeskočí a odmítne jiný tvar než X.Y.Z, i kdyby byl náhled omylem označen jako stabilní. Zkušební publikování lze provést na odděleném TestPyPI.
 
 ## Připravené workflow
 
@@ -62,15 +62,15 @@ Projekt vznikne při první úspěšné důvěryhodné publikaci. Pending publis
 
 ```bash
 python -m pip install -r requirements.txt
-python -m pip install --index-url https://test.pypi.org/simple/ --no-deps 'mbmerge==1.1.0'
+python -m pip install --index-url https://test.pypi.org/simple/ --no-deps 'mbmerge==2.0.0'
 mbmerge --version
 ```
 
 3. Pokud měníš verzi, uprav `VERSION`, commitni finální soubory a pushni. Pro současnou verzi:
 
 ```bash
-git tag -a v1.1.0 -m "mbmerge 1.1.0"
-git push origin v1.1.0
+git tag -a v2.0.0 -m "mbmerge 2.0.0"
+git push origin v2.0.0
 ```
 
 4. Na GitHubu vytvoř a **zveřejni** Release pro existující tag. **Set as a pre-release** použij jen pro náhledy; produkční publikace je přeskočí. Napiš poznámky ke změnám a kompatibilitě. Workflow znovu ověří projekt, porovná tag s verzí distribucí a po schválení prostředí nahraje wheel/sdist na PyPI.
@@ -83,7 +83,7 @@ mbmerge --version
 
 Pro existující instalaci použij `pipx upgrade mbmerge`. GitHub automaticky nabídne zdrojové archivy tagu; wheel a sdist najdeš také v artefaktu `python-distributions` daného workflow a na PyPI. Workflow nepřipojuje další binární soubory přímo ke GitHub Release.
 
-TestPyPI a PyPI mají oddělené verze: test `1.1.0` neobsadí `1.1.0` na ostrém indexu. Již nahrané distribuční soubory nelze přepsat. Opakování úspěšné publikace proto může skončit chybou; neobcházej ji změněnými artefakty pod stejnou verzí. Chybný build nebo kontrolu před uploadem lze po opravě bezpečně zopakovat.
+TestPyPI a PyPI mají oddělené verze: test `2.0.0` neobsadí `2.0.0` na ostrém indexu. Již nahrané distribuční soubory nelze přepsat. Opakování úspěšné publikace proto může skončit chybou; neobcházej ji změněnými artefakty pod stejnou verzí. Chybný build nebo kontrolu před uploadem lze po opravě bezpečně zopakovat.
 
 ## Lokální ověření před vydáním
 
@@ -94,7 +94,7 @@ python -m pip install '.[release]'
 python -m unittest discover -s tests -v
 python -m build
 python -m twine check --strict dist/*
-python tools/check_release.py --dist-dir dist --tag v1.1.0
+python tools/check_release.py --dist-dir dist --tag v2.0.0
 python -m pip install --force-reinstall --no-deps dist/*.whl
 python -I tools/smoke_installed.py
 ```
@@ -114,3 +114,9 @@ Standardní `python -m build` používá izolované build prostředí. `--no-iso
 ## Podklady
 
 [PyPA balíčkování](https://packaging.python.org/en/latest/tutorials/packaging-projects/), [PyPI Trusted Publishing](https://docs.pypi.org/trusted-publishers/using-a-publisher/), [publikování přes GitHub Actions](https://packaging.python.org/en/latest/guides/publishing-package-distribution-releases-using-github-actions-ci-cd-workflows/), [TestPyPI](https://packaging.python.org/en/latest/guides/using-testpypi/), [Semantic Versioning](https://semver.org/).
+
+## Kompatibilita verze 2
+
+Verze 2.0.0 mění nové výstupy na merge základního zoomu s následnou tvorbou přehledů a používá schéma 3. Výstupy 1.x přestav do nových archivů z původních vstupů. Explicitní `--mode overlay` zachovává workflow dodaných zoomů pro nové výstupy. Oba režimy vynucují bezztrátové kódování včetně jedinečných ztrátových WebP. Poznámky k vydání musí popsat změnu chování a nová pevná nastavení zoomů/režimu.
+
+Povolovací proměnné musí být **Repository variables**, nikoli proměnné uvnitř prostředí `pypi`/`testpypi`: podmínka celého jobu se vyhodnocuje dříve, než jsou dostupné proměnné prostředí. Pokud se proto publikace přeskočila, přidej proměnnou repozitáře a spusť znovu všechny joby existujícího release; nepřepisuj tag ani nezvyšuj verzi, dokud nedošlo k uploadu.

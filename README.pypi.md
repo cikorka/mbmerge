@@ -1,6 +1,6 @@
 # mbmerge
 
-Incrementally merge PNG and WebP raster MBTiles with alpha compositing, bounded batches, parallel image processing, and a single SQLite writer. Resume safely after interruption without applying committed translucent layers twice.
+Build incremental, lossless raster MBTiles mosaics: **merge one common highest source zoom first, then generate lower zooms from the merged detail**. PNG/WebP alpha compositing, bounded batches, parallel workers, one SQLite writer, and crash-safe recovery of both phases.
 
 ## Installation
 
@@ -9,32 +9,43 @@ pipx install mbmerge
 mbmerge --version
 ```
 
-Alternatively, install with `python -m pip install mbmerge` in a virtual environment. Requires Python 3.11+, SQLite 3.35+, and Linux/macOS. Windows is not supported. Pillow is installed as a dependency; WebP support is required when reading or writing WebP.
+Or use `python -m pip install mbmerge` in a virtual environment. Requires Linux/macOS, Python 3.11+, SQLite 3.35+ and Pillow (installed as a dependency). Windows is not supported. WebP needs Pillow's WebP codec.
 
 ## Usage
 
 ```bash
-mbmerge merge --input-dir /data/inputs --output /data/merged.mbtiles
+mbmerge merge --input-dir /data/inputs --output /data/mosaic.mbtiles
 
-# PNG output, including transparent overlaps:
-mbmerge merge --input-dir /data/inputs --output /data/merged-png.mbtiles \
-  --output-format png --png-compress-level 3
+# Choose a common base level and generate zooms 5..16 as PNG:
+mbmerge merge --input-dir /data/inputs --output /data/mosaic-png.mbtiles \
+  --base-zoom 16 --min-zoom 5 --output-format png
 
-mbmerge status --output /data/merged.mbtiles
-mbmerge verify --output /data/merged.mbtiles --decode
+# Keep supplied zoom artwork instead of generating a pyramid:
+mbmerge merge --mode overlay --input-dir /data/inputs --output /data/overlay.mbtiles
+
+mbmerge status --output /data/mosaic.mbtiles
+mbmerge verify --output /data/mosaic.mbtiles --decode
 ```
 
-Run the same merge command again to resume. Completed unchanged sources are skipped; new sources are appended. Later sources are composited over earlier sources at shared tile coordinates. Different tile coordinates remain distinct in the combined archive.
+New outputs default to pyramid mode and lossless WebP. Automatic base selection requires the same actual highest zoom in every nonempty input. An explicit base must exist in every nonempty input. Only the selected level is imported; supplied lower overviews are ignored. After ordered source compositing, lower levels are generated from up to four current children with premultiplied-alpha BOX averaging. Missing children are transparent. On later imports only affected ancestors are rebuilt.
+
+Repeat the merge command after interruption. Completed unchanged sources are skipped. New sources append after earlier layers; an interrupted active source finishes first. Dirty parent keys and their progress are persisted atomically with pixels. Publish only phase `complete`; `verify` rejects incomplete/tainted outputs. During updates readers may see new detail and stale overviews.
+
+## Lossless encoding
+
+PNG and WebP outputs are lossless. WebP explicitly uses `lossless=True, exact=True`; quality=100 alone would not guarantee lossless RGB. Unique matching PNG/lossless WebP tiles may retain their original bytes. Lossy WebP input is transcoded losslessly even without overlap; source losses cannot be restored. Image compositing/downsampling still involves 8-bit rounding and lower spatial resolution.
 
 ## Input and operating limits
 
-Inputs must be immutable, offline, flat MBTiles tables with a unique ascending index on `(zoom_level,tile_column,tile_row)`. Coordinates are Web Mercator/TMS. Tiles must have the same square dimensions; the default is 512 px (`--tile-size 256` for 256 px sources). Static WebP and PNG up to 8 bits per channel are supported; mixed inputs are converted to a uniform output format. New outputs default to lossless WebP. Animations, 16-bit PNG, JPEG, vector tiles, normalized layouts and WAL-mode sources are rejected.
+Inputs must be immutable, offline flat MBTiles with a unique ascending BINARY index on `(zoom_level,tile_column,tile_row)`. Coordinates use the same Web Mercator/TMS grid; square dimensions must match (default 512 px). Static WebP and PNG up to 8 bits/channel can be mixed. Animations, 16-bit PNG, JPEG, vectors, normalized layouts and WAL-mode inputs are rejected. `merge` performs no reprojection. `mbmerge tile` (needs GDAL ≥ 3.11 command-line tools) creates such inputs from GeoTIFF/PDF/VRT/JPEG with polygon clipping, nodata/collar handling and lossless packing. `--reimport changed|always` overlays a new version of an imported source again; `--verify-recorded stat` avoids re-hashing a large unchanged history.
 
-An existing output created by mbmerge is extended. For an MBTiles archive created by another tool, use it as the first input and choose a new output. Changed previously imported sources are rejected: restore their exact original bytes or rebuild. Keep all recorded source paths available. The output format and active encoder settings are fixed on resume.
+Version 2 uses schema 3 and changes the default to pyramid generation. Existing version 1.x outputs are refused without modification; rebuild to a new output from original sources. Other existing archives can be explicitly used as flattened inputs, never adopted as managed outputs. Mode, base/minimum zoom, format, tile size and active encoder settings are fixed after importing starts.
 
-Batches, submitted jobs, blob sizes and image dimensions are bounded. The batch budget is not a hard cap on total process RSS. Use local SQLite-compatible storage and avoid long output-reader transactions during importing. Bounds use declared source extents or full tile footprints, without alpha-edge cropping. A real 1 TB import has not been tested.
+Changed historical sources are rejected. Keep their recorded paths available; restore exact original bytes or rebuild. Every invocation hashes all historical sources, so use a single input list/directory for the initial collection rather than invoking once per file.
 
-Use `mbmerge merge --help` for all limits and options. `python -m mbmerge` is also supported.
+Jobs, blob bytes and image dimensions are bounded; pending parent keys live on disk. The batch budget is not an absolute RSS cap. Pyramid mode requires a byte budget at least five times the maximum tile size in bytes (four children and a parent). Use local SQLite-compatible storage, avoid long output-reader transactions and allow free space for output/WAL/indexes. Bounds use source extents or base tile footprints without alpha cropping. A real 1 TB collection has not been validated.
+
+Use `mbmerge merge --help` for limits. `python -m mbmerge` is supported. The repository contains English/Czech docs, synthetic demos, crash tests and reproducible memory/many-file benchmarks.
 
 ## License
 
