@@ -19,8 +19,10 @@
 #    children, highest dirty level first, and mark complete only after draining.
 #
 # Source snapshots and SHA-256 checks protect the history recorded in the output.
-# Changed sources cannot simply be overlaid again, because removed pixels would
-# survive. See ARCHITECTURE.md for the state machine and maintenance checklist;
+# A changed source is refused unless --reimport asks to overlay it again: that
+# is exact only for sources whose alpha is 0/255 and whose new version covers
+# the old one, because pixels removed from a source survive in the output.
+# See ARCHITECTURE.md for the state machine and maintenance checklist;
 # README.md documents supported formats, operational limits and CLI examples.
 from __future__ import annotations
 
@@ -386,17 +388,21 @@ def encode(im, output_format, method, png_compress_level, max_blob):
 
 
 def process_tile(job, tile_size, method, max_blob, output_format="webp",
-                 png_compress_level=6, source_format=None):
-    """Worker entry: (z,x,y,new_bytes,old_bytes_or_None) -> (z,x,y,result_bytes).
+                 png_compress_level=6, source_format=None, keep_empty=False):
+    """Worker entry: (z,x,y,new_bytes,old_bytes_or_None) -> (z,x,y,result_bytes_or_None).
 
     The existing output is the base; this source is the overlay. A unique tile
     can be copied only after validation and only in the selected output format.
     All other paths encode the same 8-bit RGBA compositing result losslessly.
+    A fully transparent overlay changes nothing; None tells the writer to skip
+    it (unless keep_empty stores a unique transparent tile as before).
     """
     from PIL import Image
     z, x, y, data, old = job
     try:
         with decode(data, tile_size, max_blob, source_format) as overlay:
+            if overlay.getchannel("A").getextrema()[1] == 0 and (old is not None or not keep_empty):
+                return z, x, y, None
             if old is None:
                 if image_format(data) == output_format and (output_format == "png" or lossless_webp(data)):
                     return z, x, y, data  # validate; preserve bytes in the selected format
@@ -418,7 +424,7 @@ def worker_init():
 
 
 def process_overview(job, tile_size, method, max_blob, output_format="webp",
-                     png_compress_level=6, source_format=None):
+                     png_compress_level=6, source_format=None, keep_empty=False):
     """Build one parent from four CURRENT children, never overlay an old parent.
 
     BOX is a 2x2 area average without a filter halo, so four children suffice.
@@ -460,7 +466,8 @@ def bounded_results(pool, jobs, args, metrics, source_format=None, worker=proces
                 break
             pending.add(pool.submit(worker, job, args.tile_size,
                                     args.webp_method, args.max_tile_mib * MIB,
-                                    args.output_format, args.png_compress_level, source_format))
+                                    args.output_format, args.png_compress_level, source_format,
+                                    getattr(args, "keep_empty", False)))
         metrics["peak_inflight"] = max(metrics["peak_inflight"], len(pending))
     try:
         fill()
@@ -883,22 +890,101 @@ def build_pyramid(db, pool, args, settings, metrics):
             raise
 
 
-def preflight(db, args):
+def recorded_state(path, expected_sha, fingerprint, args):
+    """Return (unchanged, stamp, sha) for a recorded source.
+
+    --verify-recorded stat trusts an identical stat fingerprint (device, inode,
+    size, mtime, ctime) and hashes only when it differs, so a touched but
+    byte-identical file is still recognized as unchanged. sha is None when the
+    stat shortcut avoided hashing.
+    """
+    with source(path, args) as (src, stamp):
+        if args.verify_recorded == "stat" and json.loads(fingerprint) == list(stamp):
+            return True, stamp, None
+        actual = digest(path, stamp)
+        return actual == expected_sha, stamp, actual
+
+
+def preflight(db, args, listed=()):
     """Recheck every historical contribution before importing anything new.
 
     A hash mismatch here leaves the output untainted: restoring the original
     source is sufficient. A change DURING import has different safety semantics.
+    Sources listed in this run under --reimport are decided by plan_reimports.
     """
     # Validate every previous contribution, including paths omitted from this run.
-    for path_s, expected, state in db.execute("SELECT path,sha256,status FROM _merge_sources ORDER BY seq"):
+    rows = db.execute("SELECT path,sha256,fingerprint,status FROM _merge_sources ORDER BY seq").fetchall()
+    for path_s, expected, fingerprint, state in rows:
         if state == "tainted":
             raise MergeError(f"Output was tainted by an input changing during import: {path_s}. Rebuild to a new output.")
+        if args.reimport != "never" and path_s in listed:
+            continue
         path = Path(path_s)
-        log(args, "verify_source", path=path)
-        with source(path, args) as (src, stamp):
-            actual = digest(path, stamp)
-            if actual != expected:
-                raise MergeError(f"Changed imported input: {path}. Restore the original exact bytes or rebuild to a NEW output; overlay replacement is unsafe.")
+        log(args, "verify_source", path=path, method=args.verify_recorded)
+        unchanged, stamp, actual = recorded_state(path, expected, fingerprint, args)
+        if not unchanged:
+            hint = (" List it with --reimport changed to overlay the new version," if args.reimport == "never" else
+                    " List it in this run to overlay the new version,")
+            raise MergeError(f"Changed imported input: {path}.{hint} restore the original exact bytes, or rebuild to a NEW output.")
+        if actual is not None and json.loads(fingerprint) != list(stamp):
+            remember_fingerprint(db, path_s, stamp)
+
+
+def remember_fingerprint(db, path_s, stamp):
+    """Record the current stat of a byte-identical source so stat checks pass."""
+    db.execute("BEGIN IMMEDIATE")
+    db.execute("UPDATE _merge_sources SET fingerprint=? WHERE path=?", (json.dumps(stamp), path_s))
+    _commit(db)
+    checkpoint(db)
+
+
+def plan_reimports(db, args, paths):
+    """Select listed, completely imported sources to overlay again.
+
+    changed: only sources whose content differs from the recorded hash.
+    always:  every listed source. Active (interrupted) sources always resume.
+    """
+    if args.reimport == "never":
+        return set()
+    recorded = {p: (sha, fp) for p, sha, fp in db.execute(
+        "SELECT path,sha256,fingerprint FROM _merge_sources WHERE status='complete'")}
+    chosen = set()
+    for path in paths:
+        if str(path) not in recorded:
+            continue
+        if args.reimport == "always":
+            chosen.add(str(path))
+            continue
+        sha, fingerprint = recorded[str(path)]
+        log(args, "verify_source", path=path, method=args.verify_recorded)
+        unchanged, stamp, actual = recorded_state(path, sha, fingerprint, args)
+        if not unchanged:
+            chosen.add(str(path))
+        elif actual is not None and json.loads(fingerprint) != list(stamp):
+            remember_fingerprint(db, str(path), stamp)
+    return chosen
+
+
+def reset_for_reimport(db, path, args, settings):
+    """Turn a complete source back into an active one at its first tile.
+
+    The recorded hash/fingerprint switch to the current file in the same
+    transaction, so a crash afterwards resumes this source exactly like any
+    other interrupted import. Extents and zooms keep their union: tiles of the
+    previous version remain in the output.
+    """
+    with source(path, args) as (src, stamp):
+        sha = digest(path, stamp)
+        meta = read_metadata(src)
+    db.execute("BEGIN IMMEDIATE")
+    db.execute("""UPDATE _merge_sources SET status='active',sha256=?,fingerprint=?,source_metadata=?,
+        last_z=NULL,last_x=NULL,last_y=NULL,completed_at=NULL WHERE path=?""",
+               (sha, json.dumps(stamp), json.dumps(meta), str(path)))
+    db.execute("UPDATE _merge_state SET phase='importing' WHERE id=1")
+    update_metadata(db, settings)
+    _commit(db)
+    checkpoint(db)
+    log(args, "reimport", path=path)
 
 
 def import_source(db, pool, path, args, settings, metrics):
@@ -920,7 +1006,7 @@ def import_source(db, pool, path, args, settings, metrics):
         row = db.execute("SELECT seq,sha256,status,last_z,last_x,last_y,tile_count,overlaps,minzoom,maxzoom,west,south,east,north FROM _merge_sources WHERE path=?", (str(path),)).fetchone()
         if row:
             if row[1] != sha or row[2] == "tainted":
-                raise MergeError(f"Changed/tainted input {path}; rebuild to a NEW output")
+                raise MergeError(f"Changed/tainted input {path}; use --reimport changed or rebuild to a NEW output")
             if row[2] == "complete":
                 return
         else:
@@ -959,19 +1045,24 @@ def import_source(db, pool, path, args, settings, metrics):
                 # metadata are inseparable. Worker/SQL failures roll all back.
                 db.execute("BEGIN IMMEDIATE")
                 db.execute("UPDATE _merge_state SET phase='importing' WHERE id=1")
-                sql_rows, sql_bytes = [], 0
+                sql_rows, sql_bytes, written = [], 0, []
                 results = bounded_results(pool, jobs, args, metrics, meta.get("format"))
                 try:
                     for result in results:
+                        if result[3] is None:
+                            metrics["empty_skipped"] += 1
+                            continue
                         size = len(result[3])
                         if sql_rows and (len(sql_rows) >= args.sql_batch_size or sql_bytes + size > args.sql_batch_mib * MIB):
                             db.executemany(UPSERT, sql_rows)
+                            written.extend(r[:3] for r in sql_rows)
                             sql_rows.clear()
                             sql_bytes = 0
                         sql_rows.append(result)
                         sql_bytes += size
                     if sql_rows:
                         db.executemany(UPSERT, sql_rows)
+                        written.extend(r[:3] for r in sql_rows)
                 finally:
                     results.close()
                 # Check again after CPU work, before making any new pixels
@@ -986,7 +1077,7 @@ def import_source(db, pool, path, args, settings, metrics):
                 if meta.get("attribution"):
                     db.execute("INSERT OR IGNORE INTO _merge_attributions VALUES(?)", (meta["attribution"],))
                 if args.mode == "pyramid":
-                    mark_parents(db, (job[:3] for job in jobs), args.min_zoom)
+                    mark_parents(db, written, args.min_zoom)
                 update_metadata(db, settings)
                 _commit(db)  # pixels + keyset + metadata, atomically
                 checkpoint(db)  # stop if readers prevent bounded WAL reuse
@@ -996,7 +1087,7 @@ def import_source(db, pool, path, args, settings, metrics):
                         batch_bytes=budget, peak_inflight=metrics["peak_inflight"])
                     last_log = time.monotonic()
                 # Do not retain the previous batch while loading the next one.
-                del jobs, sql_rows, result, results
+                del jobs, sql_rows, results, written
             # Detect out-of-band edits with restored size/mtime as well.
             if digest(path, stamp) != sha:
                 raise SourceChanged(f"Source content changed during import: {path}")
@@ -1053,7 +1144,7 @@ def merge(args):
         raise MergeError(f"Output directory does not exist: {output.parent}")
     paths = collect_inputs(args, output)
     metrics = {"batches": 0, "peak_inflight": 0, "peak_batch_bytes": 0,
-               "overview_tiles": 0, "overview_batches": 0}
+               "overview_tiles": 0, "overview_batches": 0, "empty_skipped": 0, "reimported": 0}
     start = time.monotonic()
     with output_lock(output):
         if output.exists() and output.stat().st_nlink != 1:
@@ -1064,26 +1155,36 @@ def merge(args):
                 from PIL import features
                 if not features.check("webp"):
                     raise MergeError("Pillow has no WebP support; use --output-format png for PNG-only work")
-            preflight(db, args)
+            listed = {str(p) for p in paths}
+            preflight(db, args, listed)
             prior = dict(db.execute("SELECT path,status FROM _merge_sources ORDER BY seq"))
             prior_identities = {token(Path(p))[:2]: p for p in prior}
             for path in paths:
                 alias = prior_identities.get(token(path)[:2])
                 if alias is not None and alias != str(path):
                     raise MergeError(f"New input aliases an already imported physical file: {alias}")
+            reimports = plan_reimports(db, args, paths)
             # A partially imported source always finishes before any new overlay.
             active = [Path(p) for p, state in prior.items() if state == "active"]
-            todo = active + [p for p in paths if str(p) not in prior]
+            todo = active + [p for p in paths
+                             if (str(p) not in prior or str(p) in reimports) and p not in active]
             if not paths and not active and not prior:
                 raise MergeError("No inputs found")
             prepare_sources(db, todo, args, settings)
             log(args, "plan", mode=args.mode, base_zoom=args.base_zoom, min_zoom=args.min_zoom,
-                new_or_active=len(todo), skipped=sum(prior.get(str(p)) == "complete" for p in paths), workers=args.workers)
+                new_or_active=len(todo) - len(reimports), reimport=len(reimports),
+                skipped=sum(prior.get(str(p)) == "complete" and str(p) not in reimports for p in paths),
+                workers=args.workers)
             dirty = db.execute("SELECT 1 FROM _merge_dirty LIMIT 1").fetchone()
             if todo or dirty:
                 with ProcessPoolExecutor(max_workers=args.workers,
                         mp_context=multiprocessing.get_context("spawn"), initializer=worker_init) as pool:
                     for path in todo:
+                        if str(path) in reimports:
+                            # Reset just before importing: after a crash the source is
+                            # active and resumes first, never overlaid twice.
+                            reset_for_reimport(db, path, args, settings)
+                            metrics["reimported"] += 1
                         import_source(db, pool, path, args, settings, metrics)
                     if args.mode == "pyramid":
                         build_pyramid(db, pool, args, settings, metrics)
@@ -1205,6 +1306,14 @@ def parser():
     m.add_argument("--description")
     m.add_argument("--type", choices=("overlay", "baselayer"))
     m.add_argument("--json-log", action="store_true")
+    m.add_argument("--reimport", choices=("never", "changed", "always"), default="never",
+                   help="listed, already imported sources: never (default; changed ones are refused), "
+                        "changed (overlay a new version again) or always (overlay again even if unchanged)")
+    m.add_argument("--verify-recorded", choices=("sha256", "stat"), default="sha256",
+                   help="how recorded sources are checked each run: full SHA-256 (default) or stat "
+                        "fingerprint first, hashing only files whose stat changed")
+    m.add_argument("--keep-empty", action="store_true",
+                   help="store unique fully transparent tiles instead of skipping them")
     m.set_defaults(func=merge)
     s = sub.add_parser("status", help="small ledger/metadata summary, no tile scan")
     s.add_argument("--output", required=True)
@@ -1215,6 +1324,9 @@ def parser():
     v.add_argument("--decode", action="store_true")
     v.add_argument("--max-tile-mib", type=positive, default=4)
     v.set_defaults(func=verify)
+    # Imported here: tile_mbtiles reuses helpers from this module.
+    from tile_mbtiles import add_parser as add_tile_parser
+    add_tile_parser(sub, positive)
     return p
 
 
@@ -1226,8 +1338,11 @@ def main(argv=None):
     if sqlite3.sqlite_version_info < (3, 35, 0):
         print("SQLite >= 3.35 is required", file=sys.stderr)
         return 2
+    from tile_mbtiles import TileError
     p = parser()
     args = p.parse_args(argv)
+    if args.command == "tile" and args.tile_size > 4096:
+        p.error("--tile-size must be <= 4096")
     if args.command == "merge":
         args.max_inflight = args.max_inflight or args.workers * 2
         if args.tile_size > 4096:
@@ -1245,7 +1360,7 @@ def main(argv=None):
     except KeyboardInterrupt:
         print("Interrupted; rerun the same merge command to resume.", file=sys.stderr)
         return 130
-    except (MergeError, sqlite3.Error, OSError, ValueError, ImportError, BrokenProcessPool) as e:
+    except (MergeError, TileError, sqlite3.Error, OSError, ValueError, ImportError, BrokenProcessPool) as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
     finally:

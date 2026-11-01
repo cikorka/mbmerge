@@ -6,7 +6,7 @@ Build an incremental, lossless raster MBTiles mosaic: **merge the highest source
 
 **Version 2 changes the default behavior.** New outputs use pyramid mode. Existing version 1.x outputs are refused without modification: rebuild into a new output from the original inputs. Use `--mode overlay` explicitly when you want to retain and composite every supplied zoom instead of generating overviews.
 
-Supported: Linux/macOS (POSIX), Python 3.11+, SQLite 3.35+, Pillow. Inputs must use the same Web Mercator/TMS grid and square tile size (512 px by default), with a flat indexed `tiles` table. Static PNG and WebP may be mixed. Windows, JPEG, vector tiles, animated images, 16-bit PNG, normalized MBTiles, reprojection, polygon clipping and direct GDAL inputs are outside the current scope.
+Supported: Linux/macOS (POSIX), Python 3.11+, SQLite 3.35+, Pillow 10.4+. Inputs must use the same Web Mercator/TMS grid and square tile size (512 px by default), with a flat indexed `tiles` table. Static PNG and WebP may be mixed. `mbmerge tile` creates such inputs from GDAL rasters (GeoTIFF, PDF, VRT, JPEG …) and additionally needs the GDAL ≥ 3.11 command-line tools. Windows, JPEG tiles, vector tiles, animated images, 16-bit PNG and normalized MBTiles are outside the current scope.
 
 ## One mosaic, then its pyramid
 
@@ -79,9 +79,51 @@ A UTF-8 list contains one path per line. Blank lines and lines beginning with `#
 
 Unmanaged output files and version 1.x ledgers (schemas 1/2) are rejected **before changing their journal mode or tiles**. Prefer original inputs when rebuilding. To use another archive as a flattened source, pass it as the first `--input` and select a **new** output path. This preserves its already-flattened pixels; it cannot reconstruct original layers or restore source detail.
 
-The output cannot also be an input, have hard links or match the input glob. Keep it outside the input directory. Inputs must remain offline, closed, immutable and available at their recorded absolute paths. The CLI does not replace/remove an earlier source or relocate its path. A changed imported source requires its exact original bytes to be restored or a rebuild to a new output; overlaying a replacement would leave removed pixels behind.
+The output cannot also be an input, have hard links or match the input glob. Keep it outside the input directory. Inputs must remain offline, closed and available at their recorded absolute paths. The CLI does not remove an earlier source or relocate its path. A changed imported source is refused by default; restore its exact bytes, rebuild to a new output, or overlay the new version with `--reimport` (below).
 
-Every invocation re-hashes **all recorded sources**, including those omitted from the command. Each new/active source is also hashed before and after import. This detects edits with restored size/mtime, at the cost of sequential I/O. **Import a large initial collection in one invocation with `--input-list` or `--input-dir`, not one invocation per file.** Repeated single-file invocations repeatedly hash the growing history. There is no stat-only shortcut.
+Every invocation checks **all recorded sources**, including those omitted from the command. By default (`--verify-recorded sha256`) it re-hashes them, which detects edits with restored size/mtime at the cost of sequential I/O; **import a large initial collection in one invocation**. `--verify-recorded stat` compares the recorded stat fingerprint (device, inode, size, mtime, ctime) and hashes only files whose stat changed. A touched but byte-identical file stays accepted and its new stat is remembered; a restored mtime does not hide an edit because ctime still changes. Use it when a pipeline appends one source at a time to a large history.
+
+## Overlaying a new version again: `--reimport`
+
+`--reimport` applies to sources that are **listed in this run** and already completely imported:
+
+| value | effect |
+|---|---|
+| `never` (default) | completed sources are skipped; a changed one is refused |
+| `changed` | a source whose content differs from the recorded hash is overlaid again; unchanged ones are skipped |
+| `always` | every listed source is overlaid again, changed or not |
+
+A reimported source is composited **over the current output**, exactly like a new layer, and becomes the topmost layer at that moment; its affected ancestors are regenerated. The ledger switches to the new hash in the same transaction that resets the source's cursor, so a crash resumes it like any interrupted import and never applies a committed batch twice.
+
+This is exact under two conditions, which hold for e.g. clipped, opaque map sheets:
+
+1. **Alpha is 0 or 255.** Overlaying a source with partial alpha again makes those pixels more opaque (128 over 128 gives 192). `mbmerge tile --binary-alpha` produces such sources.
+2. **The new version covers the old one.** Pixels that only the old version had are not removed. Removing a layer still requires a rebuild into a new output.
+
+With both, re-running `--reimport always` any number of times leaves the output byte-identical.
+
+## Empty tiles
+
+A fully transparent source tile changes nothing, so `merge` does not store it (neither as a unique tile nor over an existing one) and reports the count as `empty_skipped`. `--keep-empty` stores unique transparent tiles as before. Only alpha decides: an opaque white or black tile is content. Turning nodata colors into transparency is the job of the input preparation, e.g. `mbmerge tile --collar`/`--nodata`.
+
+## Creating inputs: `mbmerge tile`
+
+```bash
+mbmerge tile plan.pdf --output plan.mbtiles --zoom 17 --min-zoom 0 \
+  --cutline municipalities.shp --cwhere "KOD = '530310'" --binary-alpha
+mbmerge tile --input-dir /data/ortho --pattern '*.jpg' --output ortho.mbtiles \
+  --collar black --collar white --near 15
+```
+
+The result is a flat, lossless (WebP by default, or `--format png`) TMS MBTiles that `merge` accepts as is; unique tiles are then copied without re-encoding. Steps, all through GDAL command-line tools:
+
+1. **Per input:** PDF rasterized at `--pdf-dpi` (300). Declared nodata, masks and alpha are always honoured. `--collar COLOR` (repeatable: `black`, `white` or `R,G,B`) makes edge-connected collars transparent like `nearblack -setalpha`, with tolerance `--near` for lossy sources; black or white areas inside the image stay. `--nodata R,G,B` (repeatable) makes an exact color transparent **everywhere** in the input. Both happen before any resampling, so collars cannot blend into valid pixels.
+2. Several inputs form one mosaic; later inputs are drawn over earlier ones.
+3. **One warp** to EPSG:3857 at exactly the resolution of `--zoom`, aligned to the tile grid (`-tap`), optionally clipped by `--cutline`/`--cwhere`. Without `--zoom` the level nearest to the source resolution is used. `--resampling auto` uses `average` when the source is finer than the target, else `bilinear`.
+4. Tiling with `nearest` at the base level (the pixels are already aligned) and `average` for levels down to `--min-zoom` (default: base only; lower levels are for previews, `merge` in pyramid mode ignores them).
+5. Packing: fully transparent tiles are skipped (`--keep-empty` keeps them); `--binary-alpha [T]` snaps partial alpha at the base level to 0/255 at threshold T (128); every tile is verified lossless. Metadata record bounds, zooms and the settings used (`mbmerge:tile`).
+
+Two adjacent sources clipped by the same boundary into the same grid get complementary pixels, so the merged mosaic has no seam and no overlap at that boundary.
 
 ## Bounded memory and one writer
 
@@ -112,6 +154,9 @@ The parent owns all SQLite connections. Workers use `spawn`, receive only bounde
 | `--webp-method` | 4 | lossless compression effort 0..6 |
 | `--png-compress-level` | 6 | compression effort 0..9 |
 | `--busy-timeout` | 5 s | lock/checkpoint timeout |
+| `--reimport` | `never` | `changed`/`always` overlays listed, already imported sources again |
+| `--verify-recorded` | `sha256` | `stat`: hash recorded sources only when their stat changed |
+| `--keep-empty` | off | store unique fully transparent tiles |
 | `--log-interval` | 5 s | tile progress interval; source completions always logged |
 
 Pyramid mode requires `batch_mib >= 5 × max_tile_mib` for four maximum-size children and one parent. Overlay mode requires a factor of three. For example:
@@ -143,7 +188,7 @@ Rows use TMS (0 is south); image rows run top-to-bottom. Overview assembly place
 
 `minzoom`/`maxzoom` are indexed end-point lookups over actual committed output levels, including generated parents. `bounds` aggregate valid source declarations or base tile footprints; they do not expand to whole overview tile footprints. Declared bounds are trusted, may include an unfinished source's full extent, and are not cropped by alpha. Wrapped bounds conservatively expand to `[-180,180]`. `center` is the bounds midpoint at the current minimum zoom.
 
-`format`, `scheme=tms`, `version=1.3`, name, description, type and deduplicated attributions are maintained atomically. Name/description/type may be changed on resume. Attribution is limited to 64 KiB per source value and 1 MiB total. Fully transparent imported base tiles count as contributions; empty sources contribute no extent/attribution.
+`format`, `scheme=tms`, `version=1.3`, name, description, type and deduplicated attributions are maintained atomically. Name/description/type may be changed on resume. Attribution is limited to 64 KiB per source value and 1 MiB total. Fully transparent source tiles are not stored (see Empty tiles); empty sources contribute no extent/attribution.
 
 ## Tests and measurements
 

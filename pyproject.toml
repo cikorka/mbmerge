@@ -38,7 +38,7 @@ release = ["build>=1.2,<2", "twine>=6,<8"]
 
 [tool.setuptools]
 # Explicit modules prevent examples/tests/data from becoming import packages.
-py-modules = ["merge_mbtiles", "mbmerge"]
+py-modules = ["merge_mbtiles", "tile_mbtiles", "mbmerge"]
 include-package-data = false
 
 [tool.setuptools.dynamic]

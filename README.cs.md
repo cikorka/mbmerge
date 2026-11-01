@@ -6,7 +6,7 @@ Inkrementální bezztrátová rastrová mozaika MBTiles: **nejprve sloučit nejv
 
 **Verze 2 mění výchozí chování.** Nové výstupy používají režim pyramidy. Výstupy verze 1.x se bez změny odmítnou; vytvoř nový výstup z původních zdrojů. Pro zachování a skládání všech dodaných zoomů bez tvorby přehledů zadej výslovně `--mode overlay`.
 
-Podporované prostředí: Linux/macOS (POSIX), Python 3.11+, SQLite 3.35+, Pillow. Vstupy musí mít stejnou mřížku Web Mercator/TMS a shodnou čtvercovou velikost dlaždic (výchozí 512 px), plochou indexovanou tabulku `tiles`. Statické PNG a WebP lze kombinovat. Windows, JPEG, vektorové dlaždice, animace, 16bitové PNG, normalizované MBTiles, reprojekce, polygonový clip a přímé GDAL vstupy nejsou podporované.
+Podporované prostředí: Linux/macOS (POSIX), Python 3.11+, SQLite 3.35+, Pillow 10.4+. Vstupy musí mít stejnou mřížku Web Mercator/TMS a shodnou čtvercovou velikost dlaždic (výchozí 512 px), plochou indexovanou tabulku `tiles`. Statické PNG a WebP lze kombinovat. Takové vstupy z GDAL rastrů (GeoTIFF, PDF, VRT, JPEG …) vyrobí `mbmerge tile`, který navíc potřebuje příkazy GDAL ≥ 3.11. Windows, JPEG dlaždice, vektorové dlaždice, animace, 16bitové PNG a normalizované MBTiles nejsou podporované.
 
 ## Společná mozaika a její pyramida
 
@@ -79,9 +79,51 @@ UTF-8 seznam má jednu cestu na řádek. Prázdné řádky a řádky začínají
 
 Cizí výstupy a evidence verze 1.x (schémata 1/2) se odmítnou **před změnou journal mode nebo dlaždic**. Pro přestavbu používej původní vstupy. Jiný archiv lze použít jako první `--input` do **nového** výstupu. Zachovají se jeho již složené pixely; původní vrstvy ani ztracené detaily se neobnoví.
 
-Výstup nesmí být vstupem, mít hardlinky nebo odpovídat vstupnímu globu. Ukládej ho mimo adresář zdrojů. Vstupy musí být offline, zavřené, neměnné a dostupné na evidovaných absolutních cestách. Program nenahrazuje/neodebírá dřívější zdroje ani nepřemisťuje jejich cesty. Změněný importovaný zdroj vyžaduje obnovení přesných původních bajtů nebo přestavbu do nového výstupu; prosté překrytí by ponechalo odebrané pixely.
+Výstup nesmí být vstupem, mít hardlinky nebo odpovídat vstupnímu globu. Ukládej ho mimo adresář zdrojů. Vstupy musí být offline, zavřené a dostupné na evidovaných absolutních cestách. Program neodebírá dřívější zdroje ani nepřemisťuje jejich cesty. Změněný importovaný zdroj se ve výchozím stavu odmítne; obnov jeho přesné bajty, přestav do nového výstupu, nebo novou verzi znovu přelož přes `--reimport` (níže).
 
-Při každém spuštění se znovu hashuje **celá historie vstupů**, včetně vynechaných cest. Nový/aktivní zdroj se hashuje i před a po importu. Zachytí se změny s obnovenou velikostí a mtime, za cenu sekvenčního I/O. **Velkou počáteční sadu importuj jedním spuštěním přes `--input-list` nebo `--input-dir`, nikoli samostatným spuštěním pro každý soubor.** Jinak se opakovaně čte stále rostoucí historie. Stat-only zkratka neexistuje.
+Při každém spuštění se kontroluje **celá historie vstupů**, včetně vynechaných cest. Výchozí `--verify-recorded sha256` je znovu hashuje: zachytí i změny s obnovenou velikostí a mtime, za cenu sekvenčního I/O, takže **velkou počáteční sadu importuj jedním spuštěním**. `--verify-recorded stat` porovná evidovaný otisk stat (zařízení, inode, velikost, mtime, ctime) a hashuje jen soubory, jejichž stat se změnil. Soubor jen „dotčený“, ale bajtově stejný, projde a jeho nový stat se uloží; obnovené mtime změnu neskryje, protože se změní ctime. Hodí se pro tok, který přidává zdroje po jednom k velké historii.
+
+## Opakované přeložení nové verze: `--reimport`
+
+`--reimport` platí pro zdroje **uvedené v tomto běhu**, které už jsou úplně importované:
+
+| hodnota | účinek |
+|---|---|
+| `never` (výchozí) | hotové zdroje se přeskočí; změněný se odmítne |
+| `changed` | zdroj, jehož obsah se liší od evidovaného hashe, se znovu přeloží; nezměněné se přeskočí |
+| `always` | každý uvedený zdroj se znovu přeloží, změněný i nezměněný |
+
+Znovu importovaný zdroj se skládá **přes aktuální výstup** stejně jako nová vrstva a v tu chvíli je nejvýš; jeho předci se přepočítají. Evidence přejde na nový hash ve stejné transakci, která vynuluje kurzor zdroje, takže pád se obnoví jako každý přerušený import a potvrzená dávka se nikdy nepoužije dvakrát.
+
+Přesné je to za dvou podmínek, které splňují třeba oříznuté neprůhledné mapové listy:
+
+1. **Alfa je 0 nebo 255.** Opakované přeložení zdroje s částečnou alfou tyto pixely zneprůhlední (128 přes 128 dá 192). Takové zdroje vyrobí `mbmerge tile --binary-alpha`.
+2. **Nová verze pokrývá starou.** Pixely, které měla jen stará verze, se neodstraní. Odebrání vrstvy dál vyžaduje přestavbu do nového výstupu.
+
+Pokud platí obojí, libovolný počet běhů `--reimport always` ponechá výstup bajtově stejný.
+
+## Prázdné dlaždice
+
+Zcela průhledná zdrojová dlaždice nic nemění, proto ji `merge` neuloží (jako jedinečnou ani přes existující) a počet hlásí jako `empty_skipped`. `--keep-empty` jedinečné průhledné dlaždice ukládá jako dřív. Rozhoduje jen alfa: neprůhledná bílá nebo černá dlaždice je obsah. Převod nodata barev na průhlednost patří do přípravy vstupu, např. `mbmerge tile --collar`/`--nodata`.
+
+## Výroba vstupů: `mbmerge tile`
+
+```bash
+mbmerge tile plan.pdf --output plan.mbtiles --zoom 17 --min-zoom 0 \
+  --cutline obce.shp --cwhere "KOD = '530310'" --binary-alpha
+mbmerge tile --input-dir /data/ortofoto --pattern '*.jpg' --output ortofoto.mbtiles \
+  --collar black --collar white --near 15
+```
+
+Výsledkem je ploché bezztrátové (výchozí WebP, nebo `--format png`) TMS MBTiles, které `merge` přijme beze změny; jedinečné dlaždice se pak jen zkopírují. Postup, celý přes příkazy GDAL:
+
+1. **Každý vstup zvlášť:** PDF se rastruje při `--pdf-dpi` (300). Deklarovaná nodata, masky a alfa ze zdroje platí vždy. `--collar BARVA` (opakovatelné: `black`, `white` nebo `R,G,B`) zprůhlední okraj navazující na kraj snímku jako `nearblack -setalpha`, s tolerancí `--near` pro ztrátové zdroje; černé či bílé plochy uvnitř zůstanou. `--nodata R,G,B` (opakovatelné) zprůhlední přesnou barvu **v celém** vstupu. Obojí proběhne před převzorkováním, takže se okraj nerozmaže do platných pixelů.
+2. Víc vstupů tvoří jednu mozaiku; pozdější se kreslí přes dřívější.
+3. **Jeden warp** do EPSG:3857 přesně v rozlišení `--zoom`, zarovnaný na mřížku dlaždic (`-tap`), volitelně oříznutý `--cutline`/`--cwhere`. Bez `--zoom` se použije úroveň nejbližší rozlišení zdroje. `--resampling auto` volí `average`, když je zdroj jemnější než cíl, jinak `bilinear`.
+4. Dlaždicování: na základní úrovni `nearest` (pixely už sedí na mřížku), níž `average` až po `--min-zoom` (výchozí jen základní úroveň; nižší jsou pro náhledy, `merge` je v pyramidovém režimu ignoruje).
+5. Balení: zcela průhledné dlaždice se vynechají (`--keep-empty` je ponechá); `--binary-alpha [T]` na základní úrovni zaokrouhlí částečnou alfu na 0/255 podle prahu T (128); každá dlaždice se ověří jako bezztrátová. Metadata nesou rozsah, zoomy a použité nastavení (`mbmerge:tile`).
+
+Dva sousední zdroje oříznuté stejnou hranicí do stejné mřížky dostanou doplňkové pixely, takže na té hranici nevznikne šev ani překryv.
 
 ## Omezená paměť a jediný writer
 
@@ -112,6 +154,9 @@ Rodič vlastní všechna SQLite spojení. Workery vznikají přes `spawn`, dost�
 | `--webp-method` | 4 | bezztrátová komprese 0..6 |
 | `--png-compress-level` | 6 | kompresní úsilí 0..9 |
 | `--busy-timeout` | 5 s | čekání na zámek/checkpoint |
+| `--reimport` | `never` | `changed`/`always` znovu přeloží uvedené, už importované zdroje |
+| `--verify-recorded` | `sha256` | `stat`: evidované zdroje hashuje, jen když se změnil jejich stat |
+| `--keep-empty` | vypnuto | ukládat jedinečné zcela průhledné dlaždice |
 | `--log-interval` | 5 s | interval postupu; dokončení zdroje se loguje vždy |
 
 Pyramida vyžaduje `batch_mib >= 5 × max_tile_mib` pro čtyři maximální potomky a rodiče. Overlay vyžaduje trojnásobek. Například:
@@ -143,7 +188,7 @@ TMS řádky rostou od jihu (0), obrazové řádky shora dolů. Severní potomci 
 
 `minzoom/maxzoom` jsou indexovaná krajní vyhledání nad skutečnými potvrzenými úrovněmi včetně rodičů. `bounds` agregují platná zdrojová metadata nebo základní dlaždice; nerozšiřují se na celé plochy přehledových dlaždic. Deklarace se považují za pravdivé a mohou zahrnout celý rozsah rozpracovaného zdroje. Alfa okraj se neořezává. Přechod antimeridiánu se rozšíří na `[-180,180]`. `center` je střed bounds s aktuálním minimálním zoomem.
 
-Atomicky se udržují formát, `scheme=tms`, `version=1.3`, název, popis, typ a deduplikované atribuce. Název/popis/typ lze změnit při resume. Atribuce má limit 64 KiB na zdrojovou hodnotu a 1 MiB celkem. Průhledné základní dlaždice jsou příspěvky; prázdné zdroje nepřidávají rozsah/atribuci.
+Atomicky se udržují formát, `scheme=tms`, `version=1.3`, název, popis, typ a deduplikované atribuce. Název/popis/typ lze změnit při resume. Atribuce má limit 64 KiB na zdrojovou hodnotu a 1 MiB celkem. Zcela průhledné zdrojové dlaždice se neukládají (viz Prázdné dlaždice); prázdné zdroje nepřidávají rozsah/atribuci.
 
 ## Testy a měření
 

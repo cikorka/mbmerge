@@ -20,6 +20,16 @@ Verze 2 používá spravované schéma **3**. Výchozí `pyramid` importuje spol
 | `bounded_results` | Společné spouštění workerů a backpressure |
 | `update_metadata` | Rozsahy/atribuce, indexovaná minima/maxima zoomů a fáze |
 | `status`, `verify` | Stav evidence, odmítnutí nedokončeného/tainted výstupu a dekódování |
+| `recorded_state`, `plan_reimports`, `reset_for_reimport` | Kontrola `--verify-recorded` (stat/hash), výběr uvedených zdrojů k opakovanému přeložení, návrat hotového zdroje do stavu active na první dlaždici v jedné transakci |
+| `tile_mbtiles.tile` | `mbmerge tile`: řetěz příkazů GDAL (nodata/okraje → alfa, mozaika, warp, ořez v cílové mřížce, dlaždice) a bezztrátové balení |
+
+## Opakovaný import, prázdné dlaždice a `tile`
+
+Opakovaný import je běžný import téže cesty s vynulovaným kurzorem: `reset_for_reimport` uloží nový hash/otisk, vymaže `last_*` a nastaví `active` v jedné transakci těsně před `import_source`. Pád po tomto commitu zanechá aktivní zdroj, který se jako každý přerušený import dokončí první od potvrzeného kurzoru; potvrzená dávka se nikdy nepoužije dvakrát. Rozsahy a krajní zoomy si ponechají sjednocení, protože dlaždice předchozí verze zůstávají. Neresetuj víc zdrojů předem: obnova by pak šla podle `seq`, ne podle zadané priority.
+
+`process_tile` vrací `None` pro zcela průhledný překryv (a pro jedinečný bez `--keep-empty`). Writer ho přeskočí a `mark_parents` dostane jen zapsané klíče, takže prázdná dlaždice nemění pixely ani neplánuje předky.
+
+`tile_mbtiles` nepoužívá Python bindingy GDAL; příkazy GDAL ≥ 3.11 spouští jako podprocesy, aby balíček zůstal instalovatelný přes pip. Ořezávej až po převzorkování do cílové mřížky: gdalwarp vyhodnocuje cutline v pixelovém prostoru zdroje a ořez při reprojekci dá každému dokumentu jiné vzorkování hranice (na reálných územních plánech tisíce překrývajících se pixelů a jednopixelové mezery mezi sousedy). `test_neighbours_clipped_by_shared_boundary_are_complementary` s jednokrokovou variantou selže.
 
 ## Pevný kontrakt
 

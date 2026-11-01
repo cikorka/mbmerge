@@ -20,6 +20,16 @@ Version 2 uses managed schema **3**. The default `pyramid` pipeline imports one 
 | `bounded_results` | Shared spawned-worker dispatcher and backpressure for either image operation |
 | `update_metadata` | Source extents/attributions, indexed output zoom extrema, mode/phase metadata |
 | `status`, `verify` | Ledger/state report; reject incomplete/tainted outputs and optionally decode images |
+| `recorded_state`, `plan_reimports`, `reset_for_reimport` | `--verify-recorded` stat/hash check; choose listed sources to overlay again; switch a complete source back to active at its first tile in one transaction |
+| `tile_mbtiles.tile` | `mbmerge tile`: GDAL CLI pipeline (nodata/collar → alpha, mosaic, warp, clip in the target grid, tiling) and lossless packing |
+
+## Reimport, empty tiles and `tile`
+
+A reimport is an ordinary import of the same path with a reset cursor: `reset_for_reimport` stores the new hash/fingerprint, clears `last_*` and sets `active` in one transaction immediately before `import_source`. A crash after that commit leaves an active source, which resumes first at its committed cursor like any interrupted import; a committed batch is never applied twice. Extents and zoom extrema keep their union because the previous version's tiles remain. Never reset several reimports up front: their resume order would follow `seq`, not the listed priority.
+
+`process_tile` returns `None` for a fully transparent overlay (and for a unique one without `--keep-empty`). The writer skips it and `mark_parents` receives only written keys, so an empty tile neither changes pixels nor schedules ancestors.
+
+`tile_mbtiles` never uses GDAL Python bindings; it runs GDAL ≥ 3.11 tools as subprocesses so the package stays installable with pip. Clip only after resampling into the target grid: gdalwarp evaluates a cutline in its source pixel space, and clipping during reprojection gives each document a different boundary sampling (measured on real municipal plans: thousands of overlapping pixels and one-pixel cracks between neighbours). `test_neighbours_clipped_by_shared_boundary_are_complementary` fails with the one-step variant.
 
 ## Immutable contract
 

@@ -21,6 +21,17 @@ Verified contracts:
 
 Source-mutation fault injection tests the ledger response; it does not simulate every arbitrary concurrent raw-file edit. SIGKILL is real. Physical power failure, broken storage synchronization and all hardware/OS limits were not tested.
 
+## Reimport, empty tiles and `tile` (real data)
+
+`tests/test_reimport.py` and `tests/test_tile.py` add 16 tests; the full suite (46) passes with Python 3.11.2, SQLite 3.40.1, Pillow 10.4.0 and GDAL 3.11.4 ([TEST_RESULTS.txt](TEST_RESULTS.txt)) and with Python 3.13 / Pillow 13.0.0 without GDAL (9 GDAL tests skipped). They cover a changed source refused by default and overlaid by `--reimport changed` exactly like a fresh build, repeated `--reimport always` leaving binary-alpha outputs byte-identical, the documented partial-alpha accumulation, listed priority, stat verification that still catches an edit with restored mtime, skipped empty tiles, SIGKILL during a reimport of a translucent source resuming without a second overlay, and `tile` collars, nodata colors, cutlines, binary alpha, input order, PDF input and merge acceptance.
+
+Real municipal land-use plans (115 documents, Benešov district, base zoom 17, 512 px):
+
+- `tile` with clipping in the target grid: overlap between neighbouring municipalities 0 px (one-step clipping during reprojection: 9,917 px for five neighbours) and no cracks along shared boundaries (18,435 → 0; the remaining 105 lie inside individual documents). Base tiles are byte-identical to `gdal_translate -of MBTiles` output.
+- `--reimport always` of all five documents, twice: output byte-identical to the first merge (3,457 tiles).
+- `--verify-recorded stat` over 115 recorded sources: 0.38 s.
+- Reimport of three documents into a 49,496-tile WebP output while MapProxy served the same file: 12,100 requests, 0 failures, no blocked checkpoint.
+
 ## Many-file, 512px memory and fan-in measurements
 
 Each file contains one distinct PNG z=14 tile and a supplied z=1 tile shared by every file. The default pipeline must ignore the supplied z=1 imagery, import only the base and generate each required ancestor once. Four workers, max-inflight 8, 32 MiB encoded batch budget, 4 MiB tile cap and default compression settings. Every run starts with a new output.

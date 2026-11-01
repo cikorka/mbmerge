@@ -21,6 +21,17 @@ Ověřené vlastnosti:
 
 Simulace změny zdroje ověřuje reakci evidence, ne všechny možné souběžné raw-file zápisy. SIGKILL je skutečný. Fyzický výpadek napájení, vadná synchronizace disků a všechny limity OS/hardwaru testovány nebyly.
 
+## Opakovaný import, prázdné dlaždice a `tile` (reálná data)
+
+`tests/test_reimport.py` a `tests/test_tile.py` přidávají 16 testů; celá sada (46) prochází s Pythonem 3.11.2, SQLite 3.40.1, Pillow 10.4.0 a GDAL 3.11.4 ([TEST_RESULTS.txt](TEST_RESULTS.txt)) i s Pythonem 3.13 / Pillow 13.0.0 bez GDAL (9 testů s GDAL přeskočeno). Pokrývají změněný zdroj odmítnutý ve výchozím stavu a přes `--reimport changed` přeložený stejně jako při čisté přestavbě, opakované `--reimport always`, po kterém zůstane výstup s binární alfou bajtově stejný, zdokumentované hromadění částečné alfy, pořadí podle seznamu, kontrolu přes stat, která zachytí i úpravu s obnoveným mtime, vynechané prázdné dlaždice, SIGKILL během opakovaného importu poloprůhledného zdroje bez dvojího přeložení a v `tile` okraje, nodata barvy, ořez, binární alfu, pořadí vstupů, PDF a přijetí výstupu příkazem merge.
+
+Reálné územní plány (115 dokumentů okresu Benešov, základní zoom 17, 512 px):
+
+- `tile` s ořezem v cílové mřížce: překryv sousedních obcí 0 px (jednokrokový ořez při reprojekci: 9 917 px u pěti sousedů) a žádné mezery na společných hranicích (18 435 → 0; zbylých 105 leží uvnitř jednotlivých dokumentů). Základní dlaždice jsou bajtově shodné s výstupem `gdal_translate -of MBTiles`.
+- `--reimport always` všech pěti dokumentů, dvakrát: výstup bajtově shodný s prvním sloučením (3 457 dlaždic).
+- `--verify-recorded stat` nad 115 evidovanými zdroji: 0,38 s.
+- Opakovaný import tří dokumentů do WebP výstupu s 49 496 dlaždicemi, zatímco MapProxy servírovala tentýž soubor: 12 100 požadavků, 0 chyb, checkpoint nebyl zablokován.
+
 ## Mnoho souborů, 512px a paměť
 
 Každý soubor má jedinečnou základní PNG dlaždici z=14 a dodanou dlaždici z=1 společnou všem. Výchozí pipeline musí z=1 ignorovat a vytvořit každého potřebného předka jednou. Čtyři workery, max-inflight 8, rozpočet dávky 32 MiB, maximum blobu 4 MiB a výchozí komprese. Každý běh začíná novým výstupem.

@@ -10,6 +10,7 @@
 - Automatic selection requires equal actual highest zooms in all nonempty sources. An explicit `--base-zoom` must exist in every nonempty source. Other supplied levels are ignored in this mode.
 - Managed schema 3 records the immutable mode/grid/resampling/lossless contract and durable overview work. Version 1.x outputs are refused without modification; rebuild from original inputs to a new output.
 - `verify` returns an error for incomplete source imports or pending/unfinalized pyramid generation.
+- `merge` no longer stores fully transparent source tiles (they used to be stored as unique tiles). `--keep-empty` restores that.
 
 ### Added and corrected
 
@@ -23,10 +24,14 @@
 - Tests for neighboring contributions merged before downsampling, alpha edges, TMS, common-level errors, selective rebuilding and real SIGKILL before/after base and overview commits.
 - Reproducible many-file/512px benchmarks, illustrated English/Czech documentation, and installed-wheel tests covering a complete pyramid.
 - Publishing instructions explicitly distinguish repository enable variables from environment variables.
+- `merge --reimport changed|always` overlays listed, already imported sources again over the current output (a new version of the same file, or an unchanged one) and regenerates affected ancestors; crash recovery never applies a committed batch twice. For sources with 0/255 alpha whose new version covers the old one the result equals a clean rebuild, and repeating it changes nothing.
+- `merge --verify-recorded stat` checks recorded sources by stat fingerprint and hashes only those whose stat changed, for pipelines that append one source at a time to a large history.
+- New `mbmerge tile` (needs GDAL ≥ 3.11 command-line tools): GeoTIFF/PDF/VRT/JPEG → flat lossless MBTiles for `merge`. PDF rasterization, collars (`--collar`, like `nearblack`) and exact colors (`--nodata`) turned into alpha before resampling, warp into the grid of the chosen zoom and polygon clipping **in that target grid**, so neighbours clipped by a shared boundary neither overlap nor leave cracks; `--binary-alpha`, empty-tile skipping, optional overviews for previews.
+- Minimum Pillow is 10.4 (tests pass with 10.4 and 13).
 
 ### Unchanged limits
 
-No direct GDAL input, reprojection, polygon clipping, source replacement/removal, Windows support or standalone executable build. Historical sources remain immutable and are re-hashed on every invocation. The initial collection should be imported in one command. Synthetic tests do not substitute for validating a real 1 TB workload.
+No reprojection inside `merge`, source removal, Windows support or standalone executable build. A reimport does not remove pixels only an older version of a source had. Without `--verify-recorded stat`, historical sources are re-hashed on every invocation; import the initial collection in one command. Synthetic tests do not substitute for validating a real 1 TB workload.
 
 ## 1.1.0
 

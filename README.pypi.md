@@ -37,7 +37,7 @@ PNG and WebP outputs are lossless. WebP explicitly uses `lossless=True, exact=Tr
 
 ## Input and operating limits
 
-Inputs must be immutable, offline flat MBTiles with a unique ascending BINARY index on `(zoom_level,tile_column,tile_row)`. Coordinates use the same Web Mercator/TMS grid; square dimensions must match (default 512 px). Static WebP and PNG up to 8 bits/channel can be mixed. Animations, 16-bit PNG, JPEG, vectors, normalized layouts and WAL-mode inputs are rejected. No reprojection, polygon clipping or GDAL input conversion is performed.
+Inputs must be immutable, offline flat MBTiles with a unique ascending BINARY index on `(zoom_level,tile_column,tile_row)`. Coordinates use the same Web Mercator/TMS grid; square dimensions must match (default 512 px). Static WebP and PNG up to 8 bits/channel can be mixed. Animations, 16-bit PNG, JPEG, vectors, normalized layouts and WAL-mode inputs are rejected. `merge` performs no reprojection. `mbmerge tile` (needs GDAL ≥ 3.11 command-line tools) creates such inputs from GeoTIFF/PDF/VRT/JPEG with polygon clipping, nodata/collar handling and lossless packing. `--reimport changed|always` overlays a new version of an imported source again; `--verify-recorded stat` avoids re-hashing a large unchanged history.
 
 Version 2 uses schema 3 and changes the default to pyramid generation. Existing version 1.x outputs are refused without modification; rebuild to a new output from original sources. Other existing archives can be explicitly used as flattened inputs, never adopted as managed outputs. Mode, base/minimum zoom, format, tile size and active encoder settings are fixed after importing starts.
 

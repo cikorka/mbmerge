@@ -1,4 +1,4 @@
-mbmerge 2.0.0 — local Python 3.12 suite, Pillow 12.3.0
+mbmerge 2.0.0 — Linux x86_64 suite in the maplo-backend image: Python 3.11.2, SQLite 3.40.1, Pillow 10.4.0, GDAL 3.11.4 (tile tests included)
 
 test_alpha_priority_tms_metadata_and_incremental (test_merge.MergeTests.test_alpha_priority_tms_metadata_and_incremental) ... ok
 test_blocked_wal_checkpoint_stops_then_resumes (test_merge.MergeTests.test_blocked_wal_checkpoint_stops_then_resumes) ... ok
@@ -11,7 +11,7 @@ test_output_input_unmanaged_and_exclusive_lock (test_merge.MergeTests.test_outpu
 test_reject_corrupt_unique_tiles_sizes_coords_and_schema (test_merge.MergeTests.test_reject_corrupt_unique_tiles_sizes_coords_and_schema) ... ok
 test_reject_oversized_blob_before_fetch_and_decoder_bomb (test_merge.MergeTests.test_reject_oversized_blob_before_fetch_and_decoder_bomb) ... ok
 test_sigkill_before_and_after_commit_exact_resume_and_active_order (test_merge.MergeTests.test_sigkill_before_and_after_commit_exact_resume_and_active_order) ... ok
-test_source_mutation_marks_tainted_and_blocks_resume (test_merge.MergeTests.test_source_mutation_marks_tainted_and_blocks_resume) ... plan: mode=overlay base_zoom=None min_zoom=0 new_or_active=1 skipped=0 workers=1
+test_source_mutation_marks_tainted_and_blocks_resume (test_merge.MergeTests.test_source_mutation_marks_tainted_and_blocks_resume) ... plan: mode=overlay base_zoom=None min_zoom=0 new_or_active=1 reimport=0 skipped=0 workers=1
 bounds_fallback: path=<temporary>/a.mbtiles reason=missing/invalid bounds; using whole TMS tile extents
 import: path=<temporary>/a.mbtiles resumed_tiles=0
 progress: path=a.mbtiles tiles=1 overlaps=0 batch_bytes=4194344 peak_inflight=1
@@ -34,8 +34,25 @@ test_lossy_webp_is_transcoded_even_without_overlap (test_pyramid.PyramidTests.te
 test_many_sources_share_low_zoom_but_overviews_are_generated_once (test_pyramid.PyramidTests.test_many_sources_share_low_zoom_but_overviews_are_generated_once) ... ok
 test_merge_before_downsampling_and_premultiplied_alpha (test_pyramid.PyramidTests.test_merge_before_downsampling_and_premultiplied_alpha) ... ok
 test_sigkill_import_and_overview_transactions_resume_exactly (test_pyramid.PyramidTests.test_sigkill_import_and_overview_transactions_resume_exactly) ... ok
+test_changed_source_refused_without_flag_then_overlaid_like_a_fresh_build (test_reimport.ReimportTests.test_changed_source_refused_without_flag_then_overlaid_like_a_fresh_build) ... ok
+test_fully_transparent_tiles_are_skipped_unless_kept (test_reimport.ReimportTests.test_fully_transparent_tiles_are_skipped_unless_kept) ... ok
+test_reimport_always_is_idempotent_for_binary_alpha (test_reimport.ReimportTests.test_reimport_always_is_idempotent_for_binary_alpha) ... ok
+test_reimport_never_moves_unlisted_sources_and_keeps_priority_of_listed_order (test_reimport.ReimportTests.test_reimport_never_moves_unlisted_sources_and_keeps_priority_of_listed_order) ... ok
+test_reimport_of_partial_alpha_accumulates_documented_limit (test_reimport.ReimportTests.test_reimport_of_partial_alpha_accumulates_documented_limit) ... ok
+test_sigkill_during_reimport_resumes_without_double_overlay (test_reimport.ReimportTests.test_sigkill_during_reimport_resumes_without_double_overlay) ... ok
+test_verify_recorded_stat_hashes_only_changed_stat_and_catches_restored_mtime (test_reimport.ReimportTests.test_verify_recorded_stat_hashes_only_changed_stat_and_catches_restored_mtime) ... ok
+test_binary_alpha_snaps_partial_alpha_at_base_zoom (test_tile.TileTests.test_binary_alpha_snaps_partial_alpha_at_base_zoom) ... ok
+test_collar_removes_noisy_edge_but_keeps_interior_black_and_white (test_tile.TileTests.test_collar_removes_noisy_edge_but_keeps_interior_black_and_white) ... ok
+test_cutline_clips_and_drops_tiles_outside (test_tile.TileTests.test_cutline_clips_and_drops_tiles_outside) ... ok
+test_existing_output_needs_overwrite_and_errors_are_reported (test_tile.TileTests.test_existing_output_needs_overwrite_and_errors_are_reported) ... ok
+test_later_input_is_drawn_over_earlier (test_tile.TileTests.test_later_input_is_drawn_over_earlier) ... ok
+test_neighbours_clipped_by_shared_boundary_are_complementary (test_tile.TileTests.test_neighbours_clipped_by_shared_boundary_are_complementary)
+Different source grids, one diagonal boundary: no overlap and no crack. ... ok
+test_nodata_color_is_transparent_everywhere (test_tile.TileTests.test_nodata_color_is_transparent_everywhere) ... ok
+test_output_is_lossless_flat_tms_and_merge_accepts_it (test_tile.TileTests.test_output_is_lossless_flat_tms_and_merge_accepts_it) ... ok
+test_pdf_input_is_rasterized_at_requested_dpi (test_tile.TileTests.test_pdf_input_is_rasterized_at_requested_dpi) ... ok
 
 ----------------------------------------------------------------------
-Ran 30 tests in 45.514s
+Ran 46 tests in 83.629s
 
 OK

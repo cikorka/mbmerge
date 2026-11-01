@@ -68,6 +68,8 @@ def main():
         require(run([executable, "--version"], work).stdout.strip() == version, "CLI version mismatch")
         require(run([sys.executable, "-I", "-m", "mbmerge", "--version"], work).stdout.strip() == version,
                 "python -m mbmerge version mismatch")
+        # The GDAL-backed subcommand must ship in the wheel even where GDAL itself is absent.
+        require("--binary-alpha" in run([executable, "tile", "--help"], work).stdout, "mbmerge tile is missing")
         a, b = Image.new("RGBA", (512, 512)), Image.new("RGBA", (512, 512))
         ImageDraw.Draw(a).rectangle((0, 0, 300, 511), fill=(220, 10, 20, 160))
         ImageDraw.Draw(b).rectangle((250, 0, 511, 511), fill=(10, 20, 220, 128))

@@ -39,7 +39,7 @@ PNG i WebP výstup jsou bezztrátové. WebP používá `lossless=True, exact=Tru
 
 ## Vstupy a provozní omezení
 
-Neměnné offline vstupy musí mít ploché MBTiles a unikátní vzestupný BINARY index `(zoom_level,tile_column,tile_row)`. Musí odpovídat mřížka Web Mercator/TMS a rozměry čtvercových dlaždic (výchozí 512 px). Lze kombinovat statické WebP a PNG do 8 bitů na kanál. Animace, 16bitové PNG, JPEG, vektory, normalizované schéma a WAL zdroje se odmítají. Reprojekce, polygonový clip ani převod GDAL vstupů se neprovádí.
+Neměnné offline vstupy musí mít ploché MBTiles a unikátní vzestupný BINARY index `(zoom_level,tile_column,tile_row)`. Musí odpovídat mřížka Web Mercator/TMS a rozměry čtvercových dlaždic (výchozí 512 px). Lze kombinovat statické WebP a PNG do 8 bitů na kanál. Animace, 16bitové PNG, JPEG, vektory, normalizované schéma a WAL zdroje se odmítají. `merge` neprovádí reprojekci. Takové vstupy z GeoTIFF/PDF/VRT/JPEG vyrobí `mbmerge tile` (vyžaduje příkazy GDAL ≥ 3.11) včetně ořezu polygonem, převodu nodata/okrajů na alfu a bezztrátového balení. `--reimport changed|always` znovu přeloží novou verzi importovaného zdroje; `--verify-recorded stat` ušetří opakované hashování velké nezměněné historie.
 
 Verze 2 používá schéma 3 a standardně tvoří pyramidu. Výstupy 1.x odmítne bez změn; vytvoř nový výstup z originálních zdrojů. Cizí archivy lze použít jako vědomě zploštěné vstupy, nikoli převzít jako spravovaný výstup. Po začátku importu jsou režim, zoomy, formát, rozměry a aktivní komprese pevné.
 
