@@ -6,13 +6,13 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "mbmerge"
 dynamic = ["version", "dependencies"]
-description = "Incremental PNG/WebP raster MBTiles merger with alpha compositing and crash-safe resume"
+description = "Lossless raster MBTiles merger and pyramid builder with bounded memory and crash-safe resume"
 readme = {file = "README.pypi.md", content-type = "text/markdown"}
 requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE.md", "LICENSE.cs.md"]
 authors = [{name = "mbmerge contributors"}]
-keywords = ["mbtiles", "raster", "gis", "png", "webp", "tiles", "merge"]
+keywords = ["mbtiles", "raster", "gis", "png", "webp", "tiles", "merge", "pyramid", "overviews"]
 classifiers = [
     "Environment :: Console",
     "Operating System :: POSIX :: Linux",
@@ -38,7 +38,7 @@ release = ["build>=1.2,<2", "twine>=6,<8"]
 
 [tool.setuptools]
 # Explicit modules prevent examples/tests/data from becoming import packages.
-py-modules = ["merge_mbtiles", "mbmerge"]
+py-modules = ["merge_mbtiles", "tile_mbtiles", "mbmerge"]
 include-package-data = false
 
 [tool.setuptools.dynamic]

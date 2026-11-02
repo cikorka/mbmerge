@@ -1,82 +1,63 @@
-# Verification report — 2026-10-31
+# Verification report — 2026-11-01
 
 **English** | [Čeština](TEST_REPORT.cs.md)
 
-`merge_mbtiles.py` version 1.1.0 was tested on macOS ARM64, Python 3.12.14, SQLite 3.53.1, Pillow 12.3.0, and libwebp 1.6.0. These are synthetic tests. A real 1 TB input set and a complete import of thousands of source archives have not been tested. Validate a representative subset before production use.
+This report covers **mbmerge 2.0.0 / schema 3**, including base-level merge followed by bottom-up overview generation. Local host: macOS ARM64, Python 3.12.14, SQLite 3.53.1, Pillow 12.3.0, libwebp 1.6.0. Installed-distribution smoke checks also use Pillow 13.0.0. All inputs are synthetic. A real 1 TB collection has not been tested.
 
-## Automated tests
+## Automated correctness and recovery
 
-`python -m unittest discover -s tests -v`: **22 tests, OK**. The latest run output and duration are in [TEST_RESULTS.txt](TEST_RESULTS.txt).
+The complete local suite passed **30 tests**. Its console output/duration is in [TEST_RESULTS.txt](TEST_RESULTS.txt). The suite includes **16 actual process-group SIGKILL scenarios**: four in overlay source transactions, plus twelve pyramid cases covering source batches, intermediate overview batches and the last overview commit, before and after commit, for PNG and WebP.
 
-Verified scenarios:
+Verified contracts:
 
-1. Partially transparent overlaps, later-source priority, transparent regions, exact pixel comparison with Pillow alpha_composite, unchanged bytes for unique tiles, unchanged TMS rows, bounds/center/zooms/attribution, incremental addition, and skipping completed inputs.
-2. Fallback bounds for southern TMS rows, invalid NaN bounds, and conservative antimeridian handling.
-3. Changed source content with the original length and mtime restored: SHA-256 rejects the run before a new layer is added, including a recorded source omitted from the new command. Restoring its exact original bytes permits resume.
-4. Corrupt WebP, wrong image dimensions, invalid TMS keys, missing unique indexes, and explicit XYZ: errors without new committed pixels.
-5. The byte budget limits batches even with small highly compressed inputs. `peak_inflight <= 2` and `peak_batch_bytes <= 3 MiB` under the test settings.
-6. A worker failure after some SQL writes rolls back all pixels and checkpoint changes in the current batch.
-7. A long-lived external WAL reader blocks checkpointing; importing stops after source registration and resumes after the reader closes, without repeating compositing.
-8. Oversized blobs are rejected by length before their contents are fetched. Forged oversized WebP dimensions are rejected before decoding.
-9. Output-as-input rejection, refusing to adopt an unmanaged output, and exclusion of concurrent CLI writers.
-10. Rejection of WAL-mode inputs.
-11. A simulated unexpected source change during import persists the `tainted` state and prevents future importing.
-12. `EXPLAIN QUERY PLAN`: keyset reads use the index without temporary sorting; the output join performs indexed lookups.
-13. Manifest ordering, directory sorting, and empty sources.
-14. Actual SIGKILL of the process group for both PNG and WebP outputs, with a PNG source, before commit and after commit but before WAL checkpoint: SQLite integrity_check remains OK. The ledger contains 2 tiles before the targeted commit and 4 after it. Resume finishes the active source before a new layer. Both recovered outputs are **byte-identical** to the uninterrupted run. Re-importing a completed partially transparent source leaves the result unchanged.
+- Default pyramid mode imports the actual common highest zoom, ignores supplied lower-zoom imagery, and derives parents only after the base imports finish. Asymmetric north/south/west/east colors check TMS orientation. Missing children remain transparent. Bounds stay tied to source/base extents rather than expanding to overview footprints.
+- Alternating opaque red/blue contributions from separate sources become opaque purple after merging detail and then downsampling. This catches the incorrect pipeline of separately downsampling and overlaying source fragments. Invisible green RGB does not bleed into a red alpha edge.
+- Unique lossy WebP is transcoded to VP8L lossless pixels in both modes; the original decoded pixels are preserved. Mixed PNG/WebP yields uniform lossless output. `verify --decode` rejects an externally injected lossy tile or incorrect format.
+- Mismatched actual source maxima, missing explicit base levels and invalid minimum/base ranges fail safely. A rejected pristine plan can be corrected without deleting its empty output. Imported mode/base/minimum/format settings cannot silently change. Old schema 1/2 outputs are rejected byte-for-byte unchanged, including a committed uncheckpointed WAL: ownership/schema are probed read-only before opening for writes.
+- A later contribution rebuilds only its affected ancestors. Unaffected branches retain identical blobs; the complete incremental output matches a fresh ordered rebuild. Completed source replay generates no new parents or pixel changes.
+- A 96-source integration case supplies a common z=1 key in every file but only imports distinct z=8 base tiles. Parent generation equals the independent unique ancestor set; byte budgets and pending jobs remain within their configured limits.
+- Actual SIGKILL tests leave SQLite integrity intact, committed source cursors exact, parent scheduling durable and unfinished outputs rejected by verify. Resume completes an omitted active source before a new contribution. Recovered tile blobs match uninterrupted builds, including after the last parent commits but global phase is still building.
+- Existing safety tests retain priority/alpha/metadata behavior, input hashing with restored size/mtime, corrupt-image and pre-decoder dimension checks, PNG structure/modes, SQL rollback, checkpoint blocking, writer exclusion, source taint, source ordering and indexed query plans. A late-page 10,000-key source test measures actual SQLite VM work to guard against a zoom-only seek that rescans earlier base tiles.
 
-The source-mutation test injects `SourceChanged`; it does not race arbitrary raw-file writes against SQLite. The SIGKILL scenarios actually terminate processes. Physical power loss and hardware fsync behavior were not tested.
+Source-mutation fault injection tests the ledger response; it does not simulate every arbitrary concurrent raw-file edit. SIGKILL is real. Physical power failure, broken storage synchronization and all hardware/OS limits were not tested.
 
-## PNG/WebP coverage added in version 1.1
+## Reimport, empty tiles and `tile` (real data)
 
-Eight additional tests cover:
+`tests/test_reimport.py` and `tests/test_tile.py` add 16 tests; the full suite (46) passes with Python 3.11.2, SQLite 3.40.1, Pillow 10.4.0 and GDAL 3.11.4 ([TEST_RESULTS.txt](TEST_RESULTS.txt)) and with Python 3.13 / Pillow 13.0.0 without GDAL (9 GDAL tests skipped). They cover a changed source refused by default and overlaid by `--reimport changed` exactly like a fresh build, repeated `--reimport always` leaving binary-alpha outputs byte-identical, the documented partial-alpha accumulation, listed priority, stat verification that still catches an edit with restored mtime, skipped empty tiles, SIGKILL during a reimport of a translucent source resuming without a second overlay, and `tile` collars, nodata colors, cutlines, binary alpha, input order, PDF input and merge acceptance.
 
-1. PNG-to-PNG alpha compositing, original-byte preservation for a unique PNG tile, correct `metadata.format=png`, and full output decoding.
-2. Mixed WebP/PNG inputs into each output format: exact RGBA pixels, uniform encoding for every output tile, unique-byte preservation where possible, and replay without changing results.
-3. Signature detection without format metadata, plus indexed PNG transparency, grayscale, grayscale+alpha, and RGB.
-4. PNG dimensions checked before `Image.open`, bad chunk CRCs, APNG rejection, explicit 16-bit PNG rejection, and mismatched format declarations.
-5. Output format and active compression setting frozen on resume, with PNG inferred when the output-format option is omitted.
-6. A legacy schema-1 WebP ledger upgraded to schema 2 while importing a new PNG source; attempting to change its output format is rejected.
-7. Worst-case output reservation for unique tiles that need transcoding, bounded jobs/batch bytes, and encoded-output size enforcement.
-8. Output verification rejecting a tile encoded differently from the selected output format.
+Real municipal land-use plans (115 documents, Benešov district, base zoom 17, 512 px):
 
-The original published 1.0 CLI was also checked manually against a schema-2 PNG output and refused it as intended. Migration changes the ledger version, so use 1.1+ after a successful upgrade.
+- `tile` with clipping in the target grid: overlap between neighbouring municipalities 0 px (one-step clipping during reprojection: 9,917 px for five neighbours) and no cracks along shared boundaries (18,435 → 0; the remaining 105 lie inside individual documents).
+- `tile` reads the warp once, in parallel stripes, instead of tiling through warped VRTs: the largest plan (31,000 × 28,000 px, stored one row per strip) 126 → 27 s; twelve documents 378 → 165 s, or 115 s with four documents at once. Against an exact warp (`-et 0`) the materialized pixels stay within 1; `gdalwarp` writing straight to a file was faster but off by up to 82 in 8 % of pixels, so it is not used.
+- `--reimport always` of all five documents, twice: output byte-identical to the first merge (3,457 tiles).
+- `--verify-recorded stat` over 115 recorded sources: 0.38 s.
+- Reimport of three documents into a 49,496-tile WebP output while MapProxy served the same file: 12,100 requests, 0 failures, no blocked checkpoint.
 
-## Load and memory
+## Many-file, 512px memory and fan-in measurements
 
-Version 1.1.0 was measured with `python tests/benchmark_memory.py --tiles 64 512 --work-dir <temporary-directory>`, then again with `--output-format png`.
+Each file contains one distinct PNG z=14 tile and a supplied z=1 tile shared by every file. The default pipeline must ignore the supplied z=1 imagery, import only the base and generate each required ancestor once. Four workers, max-inflight 8, 32 MiB encoded batch budget, 4 MiB tile cap and default compression settings. Every run starts with a new output.
 
-Both inputs contain 512 × 512 px lossless RGBA WebP with deterministic random color data and transparency, with all coordinates overlapping. The PNG runs therefore also exercise format conversion. Four workers, at most eight submitted jobs, a 32 MiB batch budget, a 4 MiB blob limit, and other defaults. Each run starts with a new output. Column labels identify output format and tiles per source.
+| Output | Sources | Base tiles | Parents generated | Time (s) | Tree RSS (MiB) | In-flight peak | Batch bytes peak |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| webp | 128 | 128 | 134 | 9.473 | 269.3 | 7 | 29361724 |
+| webp | 7000 | 7000 | 2382 | 554.466 | 262.81 | 7 | 29363178 |
+| png | 128 | 128 | 134 | 20.771 | 217.91 | 7 | 29391138 |
+| png | 7000 | 7000 | 2382 | 451.234 | 267.59 | 7 | 29422904 |
 
-| Metric | WEBP · 64 | WEBP · 512 | PNG · 64 | PNG · 512 |
-|---|---:|---:|---:|---:|
-| Tiles per source | 64 | 512 | 64 | 512 |
-| Contributions from both sources | 128 | 1024 | 128 | 1024 |
-| Combined input size (B) | 101228544 | 809558016 | 101228544 | 809558016 |
-| Output size (B) | 51412992 | 405577728 | 58437632 | 460922880 |
-| Total time including monitoring (s) | 4.14 | 33.246 | 5.087 | 30.231 |
-| Peak process-tree RSS (MiB) | 423.67 | 390.14 | 313.25 | 321.27 |
-| Concurrent processes | 6 | 6 | 6 | 6 |
-| Maximum submitted jobs | 8 | 8 | 6 | 6 |
-| Maximum batch budget used (B) | 33130860 | 33130860 | 29898804 | 29898804 |
-| Committed data batches | 17 | 128 | 24 | 189 |
+All four runs passed full SQLite integrity checks and decoding of every output tile. Independently computed ancestor coordinates matched the entire output key set. Contributions equaled the source count, pending parents were zero and phase was complete. Both 7000-file runs generated **one z=1 tile**, rather than compositing 7000 supplied low-zoom images. The reported count of generated overviews matched the unique expected ancestor set.
 
-RSS is sampled approximately every 100 ms using `ps`, summing the parent, workers, and resource tracker. Shared pages may be counted more than once. This is a sampled practical measurement, not an exact sum of private allocations. It excludes OS filesystem cache, can miss brief peaks, and is not a hard RSS cap. The larger runs did not show growth proportional to the eightfold input increase; sampling and runtime variation can also make a smaller run's measured peak higher. Raw data and runtime versions are in [BENCHMARK.json](BENCHMARK.json). Throughput depends on data, overlaps, storage, cache, and compression; these results do not predict runtime for a 1 TB dataset.
+Raw input/output sizes, runtime versions, process counts, metrics and validation results are in [BENCHMARK.json](BENCHMARK.json). The fixtures use simple repeated imagery and small per-file data, not 1 TB of complex maps. They exercise many-file planning, source ledgers, commits, durable dirty work, actual 512px codecs and shared low-zoom fan-in. Do not extrapolate TB throughput from these timings.
 
-## Demo and README images
+RSS is sampled about every 100 ms with ps, summing the CLI parent, its workers and resource tracker. The benchmark driver, fixture preparation, output verification and OS filesystem cache are excluded. Shared pages may be counted multiple times and brief peaks may be missed. The two encoders and some development checks overlapped on the host; times are observations under that load, not an isolated speed comparison. Process-tree measurements track each CLI separately. These are not hard RSS limits.
 
-The bundled PNG inputs in `demo/png/` were merged into temporary PNG and WebP outputs. `verify --full-sqlite-check --decode` succeeded: one decoded output tile, zero unfinished sources. Both outputs match `demo/png/expected_overlap.png` exactly in decoded RGBA pixels; re-running skips both recorded sources. The output is not published because its ledger contains local absolute paths; create your own using the [README](README.md).
+An early workspace-based attempt stopped when an input fingerprint changed before the run completed. It is not counted as a successful benchmark. Fixture generators now explicitly close SQLite connections (a connection context manager only commits), and the final runs use a temporary directory. The initial event's exact cause was not established; source integrity checks were not relaxed or bypassed. The CLI now identifies which stat fields changed when reporting this error.
 
-The [compositing image](docs/images/compositing.png) is rendered from the actual demo previews and expected pixels. The [tile-grid diagram](docs/images/tile-grid.png) illustrates both unique coordinates and a shared coordinate: fragments sharing `z/x/y` produce one tile, while different coordinates stay distinct. README images can be regenerated with `examples/create_readme_images.py`.
+## Distribution and documentation checks
 
-## Operating limits
+Wheel and sdist passed strict Twine metadata validation and `check_release.py` identity/content/tag checks for v2.0.0. A wrong version tag is refused. Installation of the wheel and a wheel rebuilt from sdist passed the isolated installed-CLI test outside the checkout, using real workers, mixed 512px sources, both lossless encoders, a complete pyramid, exact base pixels, TMS checks, metadata, replay and full output decoding. English/Czech links and illustrated README assets were checked locally.
 
-Changed previously imported layers are rejected rather than regenerated. Sources must remain available at their recorded paths. Bounds are not cropped using alpha-channel content. The runtime environment sets any hard total-memory limit; the CLI bounds data batches, submitted jobs, caches, and image dimensions. Documentation includes a pilot procedure and a smaller-memory configuration. Automated tests run without real-world input data.
+GitHub-hosted CI results are available through the branch/PR Actions checks. The recorded local results above do not claim every supported runner was locally available. No release tag, GitHub Release, PyPI or TestPyPI upload is performed by these validation commands.
 
-## Packaging and GitHub Actions preparation
+## Remaining operating limits
 
-The package/repository/command is now `mbmerge`, with core VERSION still 1.1.0 and unchanged merging semantics. All 22 tests passed on Python 3.12 with Pillow 12.3.0 and again with Pillow 13.0.0; [TEST_RESULTS.txt](TEST_RESULTS.txt) contains both runs.
-
-The wheel and source distribution passed `twine check --strict` and the release identity/content checks. Both direct wheel installation and an isolated rebuild from sdist passed the installed CLI smoke test outside the checkout: real spawned workers, mixed PNG/WebP sources, exact alpha-composited pixels, uniform output format, original bytes for matching unique tiles, metadata, replay and full output verification. An intentionally wrong tag and a preview version marked for production were rejected. Build-staging canaries for unapproved demo outputs and `.env` were excluded from distributions.
-
-Workflow YAML and publishing gates were checked locally. Linux/macOS Python 3.11–3.14 jobs are configured, but GitHub-hosted Actions and actual PyPI/TestPyPI/OIDC publication have not been run in this environment. Repository/account/environment/Trusted Publisher setup remains the owner's step in [RELEASING.md](RELEASING.md). No release or package has been uploaded.
+Historical sources must remain immutable and available at their recorded paths. Every invocation re-hashes their contents unless `--verify-recorded stat` is used; use one invocation for the large initial list. Replacing/removing layers, Windows and standalone executables remain unsupported; GDAL inputs, reprojection and polygon clipping belong to `mbmerge tile`, not to `merge`. Eight-bit compositing and resampling round values; lossless encoding does not mean lossless downscaling. Publish only complete closed archives, avoid long WAL readers, use local SQLite-compatible storage and enforce any absolute memory cap at the OS level. Pilot representative real data before production.

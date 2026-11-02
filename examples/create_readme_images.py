@@ -73,7 +73,7 @@ def tile_grid(dest):
     """
     canvas = Image.new("RGB", (1560, 700), BACKGROUND)
     d = ImageDraw.Draw(canvas)
-    centered(d, 780, 24, "Merge archives AND compose their shared tiles", 34, bold=True)
+    centered(d, 780, 24, "Base zoom: merge archives AND compose shared tiles", 32, bold=True)
     centered(d, 780, 72, "Unique coordinates are retained; neighboring fragments at the same coordinate become one tile.", 22, MUTED)
     panels = [(40, "Source A MBTiles", "a"), (580, "Source B MBTiles", "b"), (1120, "Merged MBTiles", "merged")]
     cell = 112
@@ -105,8 +105,58 @@ def tile_grid(dest):
         centered(d, px + 200, 508, "2 tiles" if role != "merged" else "3 tiles, including one composed tile", 18, MUTED)
     centered(d, 510, 293, "+", 48, bold=True)
     centered(d, 1050, 293, "=", 48, bold=True)
-    centered(d, 780, 615, "Different z/x/y values stay separate. This does not stitch distinct coordinates into one oversized image.", 22, MUTED)
+    centered(d, 780, 615, "Base coordinates stay separate. Pyramid mode then creates smaller-zoom parents from neighboring tiles.", 21, MUTED)
     canvas.save(dest / "tile-grid.png", optimize=True)
+
+
+def pyramid(demo, dest):
+    """Show the two distinct operations and a real 2x2-to-1 image reduction."""
+    canvas = Image.new("RGB", (1560, 800), BACKGROUND)
+    d = ImageDraw.Draw(canvas)
+    centered(d, 780, 24, "Merge the detail first. Build the overviews afterward.", 34, bold=True)
+    centered(d, 780, 76, "PNG or WebP lossless  |  bounded jobs  |  no full-map image in memory", 22, MUTED)
+    for x, title in ((40, "1. Merge at base zoom Z"), (580, "2. Read neighboring children"), (1120, "3. Downsample one parent")):
+        d.rounded_rectangle((x, 135, x + 400, 690), 18, fill="white", outline="#d2dce8", width=2)
+        centered(d, x + 200, 159, title, 23, bold=True)
+    for x, filename, label in ((72, "a.png", "A"), (285, "b.png", "B")):
+        with Image.open(demo / filename) as im:
+            preview = checker(124)
+            preview.alpha_composite(im.convert("RGBA").resize((124, 124), Image.Resampling.BOX))
+            canvas.paste(preview.convert("RGB"), (x, 230))
+        centered(d, x + 62, 361, label, 20)
+    centered(d, 240, 270, "+", 34, bold=True)
+    with Image.open(demo / "expected_overlap.png") as im:
+        merged = im.convert("RGBA")
+    preview = checker(180)
+    preview.alpha_composite(merged.resize((180, 180), Image.Resampling.BOX))
+    canvas.paste(preview.convert("RGB"), (150, 413))
+    centered(d, 240, 615, "One completed base tile", 20, MUTED)
+    # TMS northern children are above southern children in image coordinates.
+    mosaic = Image.new("RGBA", (1024, 1024))
+    mosaic.paste(merged, (0, 0))
+    for x, y, color in ((512, 0, (240, 185, 50, 255)),
+                         (0, 512, (45, 175, 125, 255)), (512, 512, (115, 90, 195, 255))):
+        tile = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
+        td = ImageDraw.Draw(tile)
+        td.polygon(((25, 25), (485, 25), (485, 470), (255, 405), (25, 470)), fill=color)
+        mosaic.paste(tile, (x, y))
+    children = checker(344)
+    children.alpha_composite(mosaic.resize((344, 344), Image.Resampling.BOX))
+    canvas.paste(children.convert("RGB"), (608, 244))
+    d.rectangle((608, 244, 951, 587), outline=INK, width=2)
+    d.line((780, 244, 780, 588), fill=INK, width=3)
+    d.line((608, 416, 952, 416), fill=INK, width=3)
+    centered(d, 780, 615, "4 tiles at Z, each 512 x 512", 20, MUTED)
+    parent = mosaic.convert("RGBa").resize((512, 512), Image.Resampling.BOX).convert("RGBA")
+    preview = checker(344)
+    preview.alpha_composite(parent.resize((344, 344), Image.Resampling.BOX))
+    canvas.paste(preview.convert("RGB"), (1148, 244))
+    d.rectangle((1148, 244, 1491, 587), outline=INK, width=2)
+    centered(d, 1320, 615, "1 tile at Z-1, still 512 x 512", 20, MUTED)
+    centered(d, 510, 392, "→", 44, bold=True)
+    centered(d, 1050, 392, "→", 44, bold=True)
+    centered(d, 780, 727, "Repeat down to the minimum zoom. Later imports rebuild only affected ancestors.", 23, MUTED)
+    canvas.save(dest / "pyramid.png", optimize=True)
 
 
 if __name__ == "__main__":
@@ -117,3 +167,4 @@ if __name__ == "__main__":
     args.output_dir.mkdir(parents=True, exist_ok=True)
     compositing(args.demo_dir, args.output_dir)
     tile_grid(args.output_dir)
+    pyramid(args.demo_dir, args.output_dir)

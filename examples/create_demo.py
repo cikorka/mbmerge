@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 """Generate small, synthetic 512 px WebP or PNG inputs plus the expected overlap PNG."""
 import argparse
+from contextlib import closing
 import io
 from pathlib import Path
 import sqlite3
@@ -33,11 +34,12 @@ def create(root, tile_format="webp"):
             im.save(buf, "WEBP", lossless=True, exact=True)
         # Flat TMS schema and declared format match the CLI input contract.
         # The geographic bounds are synthetic and contain no local source paths.
-        with sqlite3.connect(root / f"source_{label}.mbtiles") as db:
+        with closing(sqlite3.connect(root / f"source_{label}.mbtiles")) as db:
             db.execute("CREATE TABLE tiles(zoom_level INTEGER,tile_column INTEGER,tile_row INTEGER,tile_data BLOB,PRIMARY KEY(zoom_level,tile_column,tile_row))")
             db.execute("CREATE TABLE metadata(name TEXT PRIMARY KEY,value TEXT)")
             db.execute("INSERT INTO tiles VALUES(2,1,2,?)", (buf.getvalue(),))
             db.executemany("INSERT INTO metadata VALUES(?,?)", {"format": tile_format, "scheme": "tms", "bounds": bounds, "attribution": f"Synthetic source {label.upper()}"}.items())
+            db.commit()
         im.save(root / f"{label}.png")
     Image.alpha_composite(a, b).save(root / "expected_overlap.png")
     print(root.resolve())

@@ -1,6 +1,6 @@
 # Source distributions carry reproducible tests/docs, but never arbitrary data.
 include pyproject.toml requirements.txt .gitignore
-include README*.md ARCHITECTURE*.md RELEASING*.md LICENSE*.md TEST_REPORT*.md
+include README*.md ARCHITECTURE*.md RELEASING*.md LICENSE*.md TEST_REPORT*.md CHANGELOG*.md
 include TEST_RESULTS.txt BENCHMARK.json
 recursive-include tests *.py
 recursive-include examples *.py

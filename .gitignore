@@ -1,7 +1,7 @@
 # Version in Git:
 #   Python source, tests, examples, tools/, requirements.txt, and this .gitignore.
 #   pyproject.toml, MANIFEST.in, and .github/workflows/.
-#   README*.md, TEST_REPORT*.md, ARCHITECTURE*.md, LICENSE*.md, docs/images/, and the demo PNG previews.
+#   README*.md, TEST_REPORT*.md, ARCHITECTURE*.md, CHANGELOG*.md, LICENSE*.md, docs/images/, and the demo PNG previews.
 #   The synthetic WebP/PNG MBTiles fixtures explicitly allowed below.
 #   Curated BENCHMARK.json, TEST_RESULTS.txt, and release SHA256SUMS.
 #

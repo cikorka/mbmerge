@@ -5,6 +5,7 @@ Run from the project directory: python tests/benchmark_memory.py --tiles 64 512
 Temporary DBs are deleted, report is JSON on stdout. Shared pages are counted per process.
 """
 import argparse
+from contextlib import closing
 import io
 import json
 import math
@@ -63,11 +64,12 @@ def fixture(path, data, count):
     """Stream repeated encoded tiles to SQLite without retaining all rows."""
     z = max(1, math.ceil(math.log2(math.ceil(math.sqrt(count)))))
     width = 1 << z
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as db:
         db.execute("CREATE TABLE tiles(zoom_level INTEGER,tile_column INTEGER,tile_row INTEGER,tile_data BLOB,PRIMARY KEY(zoom_level,tile_column,tile_row))")
         db.execute("CREATE TABLE metadata(name TEXT PRIMARY KEY,value TEXT)")
         db.execute("INSERT INTO metadata VALUES('format','webp')")
         db.executemany("INSERT INTO tiles VALUES(?,?,?,?)", ((z, i // width, i % width, data) for i in range(count)))
+        db.commit()
 
 
 def main(args):

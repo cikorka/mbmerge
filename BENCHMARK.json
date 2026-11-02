@@ -1,90 +1,142 @@
 {
-  "cli_version": "1.1.0",
+  "cli_version": "2.0.0",
   "benchmarks": [
     {
+      "cli_version": "2.0.0",
       "python": "3.12.14",
       "sqlite": "3.53.1",
       "platform": "macOS-27.2-arm64-arm-64bit",
       "webp": "1.6.0",
-      "workers": 4,
-      "tile_size": 512,
       "output_format": "webp",
-      "measurement": "sampled simultaneous sum of parent+descendant RSS; shared pages counted multiple times; excludes filesystem page cache",
+      "workers": 4,
+      "measurement": "sampled CLI parent+descendant RSS; shared pages can be counted more than once; excludes fixture generation, verification and filesystem page cache",
       "runs": [
         {
-          "tiles_per_source": 64,
-          "contributions": 128,
-          "input_bytes": 101228544,
-          "output_bytes": 51412992,
-          "elapsed_seconds": 4.14,
-          "peak_tree_rss_mib": 423.67,
+          "sources": 128,
+          "tile_size": 512,
+          "input_bytes": 3670016,
+          "output_bytes": 135168,
+          "elapsed_seconds": 9.473,
+          "peak_tree_rss_mib": 269.3,
           "max_processes": 6,
+          "base_tiles": 128,
+          "overview_tiles": 134,
+          "supplied_z1_contributions": 128,
+          "generated_z1_tiles": 1,
           "pipeline": {
             "event": "finished",
-            "seconds": 4.026,
-            "batches": 17,
-            "peak_inflight": 8,
-            "peak_batch_bytes": 33130860
+            "seconds": 9.226,
+            "batches": 128,
+            "peak_inflight": 7,
+            "peak_batch_bytes": 29361724,
+            "overview_tiles": 134,
+            "overview_batches": 30
+          },
+          "verify": {
+            "sqlite": "ok",
+            "decoded_tiles": 262,
+            "unfinished_sources": 0,
+            "phase": "complete",
+            "note": "Does not recheck source fingerprints; merge does that before resuming."
           }
         },
         {
-          "tiles_per_source": 512,
-          "contributions": 1024,
-          "input_bytes": 809558016,
-          "output_bytes": 405577728,
-          "elapsed_seconds": 33.246,
-          "peak_tree_rss_mib": 390.14,
+          "sources": 7000,
+          "tile_size": 512,
+          "input_bytes": 200704000,
+          "output_bytes": 4231168,
+          "elapsed_seconds": 554.466,
+          "peak_tree_rss_mib": 262.81,
           "max_processes": 6,
+          "base_tiles": 7000,
+          "overview_tiles": 2382,
+          "supplied_z1_contributions": 7000,
+          "generated_z1_tiles": 1,
           "pipeline": {
             "event": "finished",
-            "seconds": 33.123,
-            "batches": 128,
-            "peak_inflight": 8,
-            "peak_batch_bytes": 33130860
+            "seconds": 553.438,
+            "batches": 7000,
+            "peak_inflight": 7,
+            "peak_batch_bytes": 29363178,
+            "overview_tiles": 2382,
+            "overview_batches": 350
+          },
+          "verify": {
+            "sqlite": "ok",
+            "decoded_tiles": 9382,
+            "unfinished_sources": 0,
+            "phase": "complete",
+            "note": "Does not recheck source fingerprints; merge does that before resuming."
           }
         }
       ]
     },
     {
+      "cli_version": "2.0.0",
       "python": "3.12.14",
       "sqlite": "3.53.1",
       "platform": "macOS-27.2-arm64-arm-64bit",
       "webp": "1.6.0",
-      "workers": 4,
-      "tile_size": 512,
       "output_format": "png",
-      "measurement": "sampled simultaneous sum of parent+descendant RSS; shared pages counted multiple times; excludes filesystem page cache",
+      "workers": 4,
+      "measurement": "sampled CLI parent+descendant RSS; shared pages can be counted more than once; excludes fixture generation, verification and filesystem page cache",
       "runs": [
         {
-          "tiles_per_source": 64,
-          "contributions": 128,
-          "input_bytes": 101228544,
-          "output_bytes": 58437632,
-          "elapsed_seconds": 5.087,
-          "peak_tree_rss_mib": 313.25,
+          "sources": 128,
+          "tile_size": 512,
+          "input_bytes": 3670016,
+          "output_bytes": 876544,
+          "elapsed_seconds": 20.771,
+          "peak_tree_rss_mib": 217.91,
           "max_processes": 6,
+          "base_tiles": 128,
+          "overview_tiles": 134,
+          "supplied_z1_contributions": 128,
+          "generated_z1_tiles": 1,
           "pipeline": {
             "event": "finished",
-            "seconds": 4.972,
-            "batches": 24,
-            "peak_inflight": 6,
-            "peak_batch_bytes": 29898804
+            "seconds": 20.328,
+            "batches": 128,
+            "peak_inflight": 7,
+            "peak_batch_bytes": 29391138,
+            "overview_tiles": 134,
+            "overview_batches": 30
+          },
+          "verify": {
+            "sqlite": "ok",
+            "decoded_tiles": 262,
+            "unfinished_sources": 0,
+            "phase": "complete",
+            "note": "Does not recheck source fingerprints; merge does that before resuming."
           }
         },
         {
-          "tiles_per_source": 512,
-          "contributions": 1024,
-          "input_bytes": 809558016,
-          "output_bytes": 460922880,
-          "elapsed_seconds": 30.231,
-          "peak_tree_rss_mib": 321.27,
+          "sources": 7000,
+          "tile_size": 512,
+          "input_bytes": 200704000,
+          "output_bytes": 41566208,
+          "elapsed_seconds": 451.234,
+          "peak_tree_rss_mib": 267.59,
           "max_processes": 6,
+          "base_tiles": 7000,
+          "overview_tiles": 2382,
+          "supplied_z1_contributions": 7000,
+          "generated_z1_tiles": 1,
           "pipeline": {
             "event": "finished",
-            "seconds": 30.067,
-            "batches": 189,
-            "peak_inflight": 6,
-            "peak_batch_bytes": 29898804
+            "seconds": 450.575,
+            "batches": 7000,
+            "peak_inflight": 7,
+            "peak_batch_bytes": 29422904,
+            "overview_tiles": 2382,
+            "overview_batches": 350
+          },
+          "verify": {
+            "sqlite": "ok",
+            "decoded_tiles": 9382,
+            "unfinished_sources": 0,
+            "phase": "complete",
+            "note": "Does not recheck source fingerprints; merge does that before resuming."
           }
         }
       ]
