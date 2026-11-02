@@ -15,7 +15,7 @@
 ### Novinky a opravy
 
 - `--mode overlay` zachovává původní workflow skládání dodaných zoomů pro nové výstupy.
-- Trvale evidovaní deduplikovaní rodiče; generování odspodu ze čtyř aktuálních potomků, správné TMS rozmístění a BOX průměr s přednásobenou alfou.
+- Trvale evidovaní deduplikovaní rodiče; generování odspodu ze čtyř aktuálních potomků, správné TMS rozmístění a plošný průměr 2×2 s přednásobenou alfou (`reduce(2)`; BOX zmenšení zaokrouhlovalo na každé úrovni o půl stupně nahoru).
 - Atomické potvrzení obrazu rodiče, odstranění čekajícího klíče, vložení předka a postupu. Obnova po chybě/přerušení v obou fázích.
 - Inkrementální změny přepočítají pouze dotčené předky; starý přehled se znovu nepřekrývá novým.
 - Veškeré výstupní kódování je bezztrátové. Jedinečné ztrátové WebP se překóduje místo kopie; `verify --decode` odhalí ztrátové WebP vložené zvenku.
@@ -26,7 +26,7 @@
 - Publikační návod rozlišuje povolovací proměnné repozitáře od proměnných prostředí.
 - `merge --reimport changed|always` znovu přeloží uvedené, už importované zdroje přes aktuální výstup (novou verzi téhož souboru, nebo i nezměněný) a přepočítá dotčené předky; obnova po pádu nikdy nepoužije potvrzenou dávku dvakrát. Pro zdroje s alfou 0/255, jejichž nová verze pokrývá starou, je výsledek stejný jako čistá přestavba a opakování ho nemění.
 - `merge --verify-recorded stat` kontroluje evidované zdroje podle otisku stat a hashuje jen ty, jejichž stat se změnil; vhodné pro přidávání po jednom zdroji k velké historii.
-- Nový příkaz `mbmerge tile` (vyžaduje příkazy GDAL ≥ 3.11): GeoTIFF/PDF/VRT/JPEG → ploché bezztrátové MBTiles pro `merge`. Rastrování PDF, okraje (`--collar`, jako `nearblack`) a přesné barvy (`--nodata`) převedené na alfu před převzorkováním, warp do mřížky zvoleného zoomu a ořez polygonem **ve výsledné mřížce**, takže sousedé oříznutí společnou hranicí nemají překryv ani mezeru; `--binary-alpha`, vynechání prázdných dlaždic, volitelné přehledy pro náhledy. Warp se jednou přečte do dočasného GeoTIFF v paralelních pásech (`--threads`), takže se zdroje uložené po řádcích nedekomprimují znovu pro každou dlaždici; `--webp-method` platí i pro dlaždice kódované GDAL.
+- Nový příkaz `mbmerge tile` (vyžaduje GDAL ≥ 3.11: příkazy a stejnou verzi Python bindingů s numpy): GeoTIFF/PDF/VRT/JPEG → ploché MBTiles pro `merge`, výchozí bezztrátové. Rastrování PDF, okraje (`--collar`, jako `nearblack`) a přesné barvy (`--nodata`) převedené na alfu před převzorkováním, warp do mřížky zvoleného zoomu a ořez polygonem **ve výsledné mřížce**, takže sousedé oříznutí společnou hranicí nemají překryv ani mezeru; `--binary-alpha`, vynechání prázdných dlaždic, volitelné přehledy pro náhledy. Pracovní procesy (`--threads`) čtou warp po obdélnících řádek po řádku a dlaždice zapisují rovnou do MBTiles, bez pásů a adresářů dlaždic na disku, takže se zdroje uložené po řádcích nedekomprimují znovu pro každou dlaždici. Vstupy bez souřadnicového systému (world file) se odmítnou, pokud ho neurčí `--s-srs`, místo aby se četly jako metry Web Mercatoru. `--quality` zapisuje ztrátové WebP pro snímky, které se neslučují (ortofoto: 5× rychlejší kódování, 8× menší). Průběh se loguje každých 30 s.
 - Minimální Pillow je 10.4 (testy procházejí s 10.4 i 13).
 
 ### Zachovaná omezení

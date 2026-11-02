@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: MIT
 """`mbmerge tile`: GDAL rasters -> lossless flat MBTiles accepted by merge.
 
-Needs GDAL >= 3.11 command-line tools; skipped elsewhere. Rasters are tiny
-EPSG:3857 GeoTIFFs aligned to a 64 px tile grid (the minimum of gdal raster tile), so every expected pixel can be
-stated exactly: nearest at the base level means no resampling of aligned data.
+Needs GDAL >= 3.11 command-line tools and its Python bindings; skipped elsewhere.
+Rasters are tiny EPSG:3857 GeoTIFFs aligned to a 64 px tile grid, so every
+expected pixel can be stated exactly: aligned data is not resampled.
 """
 import json
 import os
@@ -25,12 +25,15 @@ COL, ROW = 512, 400  # XYZ tile of the raster's top-left corner
 
 
 def have_gdal():
+    """GDAL >= 3.11 command-line tools and the same version of its Python bindings."""
     if not shutil.which("gdal"):
         return False
     out = subprocess.run(["gdal", "--version"], capture_output=True, text=True).stdout
     try:
         major, minor = map(int, out.split()[1].split(".")[:2])
-    except (IndexError, ValueError):
+        from osgeo import gdal  # noqa: F401
+        import numpy  # noqa: F401
+    except (ImportError, IndexError, ValueError):
         return False
     return (major, minor) >= (3, 11)
 
@@ -40,7 +43,7 @@ def tms(col, row):
     return (Z, col, 2 ** Z - 1 - row)
 
 
-@unittest.skipUnless(have_gdal(), "GDAL >= 3.11 command-line tools required")
+@unittest.skipUnless(have_gdal(), "GDAL >= 3.11 command-line tools and Python bindings required")
 class TileTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -91,6 +94,21 @@ class TileTests(unittest.TestCase):
                                "--workers", "1"], capture_output=True, text=True, timeout=120)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(all_tiles(merged)[tms(COL, ROW)], tiles[tms(COL, ROW)])  # copied, not re-encoded
+
+    def test_quality_writes_lossy_webp_at_every_level(self):
+        im = Image.new("RGB", (256, 256), (40, 120, 200))
+        out, _ = self.tile(self.geotiff(im), extra=["--min-zoom", Z - 2, "--quality", "85"])
+        tiles = all_tiles(out)
+        self.assertTrue(any(k[0] == Z - 2 for k in tiles))
+        self.assertTrue(all(b[12:16] == b"VP8X" or b[12:16] == b"VP8 " for b in tiles.values()))
+        r, g, b, a = self.pixel(tiles, COL, ROW, 10, 10)
+        self.assertEqual(a, 255)
+        self.assertLessEqual(max(abs(r - 40), abs(g - 120), abs(b - 200)), 6)
+        with sqlite3.connect(out) as db:
+            settings = json.loads(db.execute("SELECT value FROM metadata WHERE name='mbmerge:tile'").fetchone()[0])
+        self.assertEqual((settings["lossless"], settings["quality"]), (False, 85))
+        _, proc = self.tile(self.geotiff(im, "png.tif"), extra=["--format", "png", "--quality", "85"], check=False)
+        self.assertEqual(proc.returncode, 1)
 
     def test_collar_removes_noisy_edge_but_keeps_interior_black_and_white(self):
         im = Image.new("RGB", (256, 256), (0, 0, 0))
@@ -199,6 +217,19 @@ class TileTests(unittest.TestCase):
             self.skipTest("GDAL build cannot write PDF")
         out, _ = self.tile(pdf, extra=["--pdf-dpi", "72"])
         self.assertIn(tms(COL + 1, ROW + 1), all_tiles(out))
+
+    def test_world_file_without_srs_is_refused_unless_s_srs_is_given(self):
+        im = Image.new("RGB", (128, 128), (200, 60, 10))
+        jpg = self.root / "sheet.jpg"
+        im.save(jpg, quality=100)
+        # world file only: pixel size, rotation, rotation, -pixel size, centre of the top-left pixel
+        ulx, uly = -WORLD / 2 + COL * TS * RES, WORLD / 2 - ROW * TS * RES
+        (self.root / "sheet.jgw").write_text(f"{RES!r}\n0\n0\n{-RES!r}\n{ulx + RES / 2!r}\n{uly - RES / 2!r}\n")
+        _, proc = self.tile(jpg, check=False)
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("--s-srs", proc.stderr)  # not silently taken as EPSG:3857 metres
+        out, _ = self.tile(jpg, extra=["--s-srs", "EPSG:3857"])
+        self.assertEqual({k for k in all_tiles(out)}, {tms(COL + i, ROW + j) for i in range(2) for j in range(2)})
 
     def test_existing_output_needs_overwrite_and_errors_are_reported(self):
         out = self.root / "exists.mbtiles"
