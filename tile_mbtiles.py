@@ -1,45 +1,68 @@
 # SPDX-License-Identifier: MIT
-"""Georeferenced rasters -> one flat, lossless MBTiles that `mbmerge merge` accepts.
+"""Georeferenced rasters -> one flat MBTiles (lossless by default) that `mbmerge merge` accepts.
 
-Pipeline (GDAL >= 3.11 command-line tools, run as subprocesses; no Python
-bindings are needed because they are tied to the system libgdal):
+Pipeline (GDAL >= 3.11 command-line tools plus its Python bindings and numpy,
+which must belong to the same libgdal):
 
-1. per input: PDF -> GeoTIFF at --pdf-dpi; edge-connected collars -> alpha
-   (`nearblack -setalpha`, --collar); exact colors -> alpha everywhere
-   (`gdalwarp -srcnodata ... -dstalpha`, --nodata). Declared nodata, masks and
-   alpha bands of the source are always honoured by GDAL itself.
+1. per input: PDF -> GeoTIFF at --pdf-dpi; a source without a coordinate
+   system gets --s-srs or is refused; palettes are expanded to RGBA;
+   edge-connected collars -> alpha (`nearblack -setalpha`, --collar); exact
+   colors -> alpha everywhere (`gdalwarp -srcnodata ... -dstalpha`, --nodata).
+   Declared nodata, masks and alpha bands of the source are always honoured.
 2. several inputs -> one mosaic (`gdalbuildvrt -addalpha`, later inputs on top).
-3. one warp to EPSG:3857 at exactly the resolution of --zoom, aligned to the
-   tile grid (-tap), optionally clipped by --cutline/--cwhere, alpha added.
-4. `gdal raster tile` (TMS rows, nearest at the base level because pixels are
-   already aligned, average for lower levels, blank tiles skipped).
-5. packing: tiles that are fully transparent are dropped, --binary-alpha snaps
-   partial alpha to 0/255, every tile is checked to be lossless.
+3. one warp to EPSG:3857 at exactly the resolution of --zoom, as a VRT aligned
+   to the tile grid and limited to the --cutline extent.
+4. base tiles straight into the MBTiles: worker processes read rectangles of
+   tiles from the warp row by row, burn the cutline into alpha in the target
+   grid, drop fully transparent tiles, apply --binary-alpha and encode
+   (lossless, or lossy WebP with --quality for imagery that is not merged).
+   The parent is the only SQLite writer; nothing is staged on disk.
+5. levels down to --min-zoom from the written base: 2x2 average with
+   premultiplied alpha, the same method `merge` uses for its pyramid.
 
-Only fully transparent tiles count as empty. Colors are never interpreted at
-packing time: turning black/white collars into transparency is step 1's job,
-before any resampling can blend them into valid pixels.
+Only fully transparent tiles count as empty. Colors are never interpreted while
+tiling: turning black/white collars into transparency is step 1's job, before
+any resampling can blend them into valid pixels.
 """
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+from collections import deque
+from concurrent.futures import ProcessPoolExecutor
 import io
 import json
 import math
+import multiprocessing
 import os
 from pathlib import Path
+import queue
 import re
-import shutil
 import sqlite3
 import subprocess
 import tempfile
+import time
+import traceback
 
-from merge_mbtiles import image_format, lossless_webp, log
+from merge_mbtiles import CHILD_OFFSETS, log, worker_init
 
 WORLD = 40075016.685578488  # EPSG:3857 extent width in metres
 MIN_GDAL = (3, 11)
 RESAMPLING = ("auto", "nearest", "bilinear", "cubic", "lanczos", "average")
-STRIPE_ROWS = 512  # materialized stripes are multiples of this, matching their GTiff block size
+# Work is split into rectangles: a band of tile columns x contiguous tile rows.
+# A worker reads its rectangle one row of tiles per GDAL request, top to
+# bottom, so sources are read forward (strip TIFFs and JPEGs cannot seek
+# backwards cheaply) and rows shared by neighbouring requests come from the
+# block cache. Rasters up to READ_COLUMNS_MAX tiles wide (a scanned plan) are
+# read in full-width rows, so a strip is never decompressed twice. Wider ones
+# (mosaics of sheets) get bands of READ_COLUMNS_WIDE tiles: a request then
+# touches only one or two sheets, whose rows the cache can keep.
+READ_COLUMNS_MAX = 64  # 64 x 512 px RGBA = 64 MiB per request
+READ_COLUMNS_WIDE = 16
+JOBS_PER_WORKER = 4  # several rectangles per worker balance areas outside a cutline
+WORKER_CACHE_MIB = 256  # GDAL block cache per worker
+QUALITY_RANGE = range(1, 101)
+OVERVIEW_INFLIGHT = 8  # overview jobs per worker submitted ahead of the writer
+OVERVIEW_COMMIT = 512  # overview tiles per transaction
+PROGRESS_SECONDS = 30
 
 
 class TileError(Exception):
@@ -56,13 +79,21 @@ def run(cmd, args):
 
 
 def gdal_version():
+    """CLI version string; the Python bindings must be the same GDAL."""
     try:
         out = subprocess.run(["gdal", "--version"], capture_output=True, text=True).stdout
     except FileNotFoundError:
         raise TileError("GDAL command-line tools not found; `mbmerge tile` needs GDAL >= 3.11 on PATH") from None
-    match = re.search(r"GDAL (\d+)\.(\d+)", out)
-    if not match or tuple(map(int, match.groups())) < MIN_GDAL:
+    match = re.search(r"GDAL (\d+\.\d+\.\d+)", out)
+    if not match or tuple(map(int, match.group(1).split(".")[:2])) < MIN_GDAL:
         raise TileError(f"`mbmerge tile` needs GDAL >= 3.11 (found: {out.strip() or 'unknown'})")
+    try:
+        import numpy  # noqa: F401  (ReadAsArray)
+        from osgeo import gdal
+    except ImportError as e:
+        raise TileError(f"`mbmerge tile` needs the GDAL Python bindings and numpy ({e})") from None
+    if gdal.__version__ != match.group(1):
+        raise TileError(f"GDAL Python bindings {gdal.__version__} differ from command-line tools {match.group(1)}")
     return out.strip()
 
 
@@ -93,12 +124,26 @@ def collect(args):
 
 
 def prepare_input(index, path, work, args):
-    """Make one input ready for mosaicking: rasterized, collars/colors -> alpha."""
+    """Make one input ready for mosaicking: rasterized, georeferenced, RGB(A), collars/colors -> alpha."""
     src = path
     if path.suffix.lower() == ".pdf":
         src = work / f"{index}.tif"
         run(["gdal_translate", "-q", "--config", "GDAL_PDF_DPI", str(args.pdf_dpi), "-of", "GTiff",
              "-co", "TILED=YES", "-co", "COMPRESS=DEFLATE", path, src], args)
+    meta = info(src, args)
+    if not meta.get("coordinateSystem", {}).get("wkt"):
+        # A world file (.jgw, .tfw) carries the geotransform only; GDAL would
+        # otherwise silently take the coordinates as EPSG:3857 metres.
+        if not args.s_srs:
+            raise TileError(f"{path.name} has no coordinate system (a world file alone does not define one); "
+                            "pass --s-srs, e.g. --s-srs EPSG:5514")
+        out = work / f"{index}_srs.vrt"
+        run(["gdal_translate", "-q", "-of", "VRT", "-a_srs", args.s_srs, src, out], args)
+        src = out
+    if meta["bands"] and "colorTable" in meta["bands"][0]:
+        out = work / f"{index}_rgba.vrt"
+        run(["gdal_translate", "-q", "-of", "VRT", "-expand", "rgba", src, out], args)
+        src = out
     if args.collar:
         out = work / f"{index}_collar.tif"
         cmd = ["nearblack", "-q", "-of", "GTiff", "-co", "TILED=YES", "-co", "COMPRESS=DEFLATE",
@@ -151,21 +196,16 @@ def cutline_extent(work, args):
 
 
 def warp(src, work, zoom, resampling, args):
-    """Warp into the tile grid, materialize it in parallel stripes, clip in that same grid.
+    """Warp VRT in the tile grid of `zoom`; return (vrt, cutline layer or None).
 
-    The warp itself is a VRT: gdalwarp writing straight to a file samples
-    differently (measured: 8 % of pixels off by up to 82 against an exact
-    `-et 0` warp, whereas the VRT stays within 1). Tiling *through* that VRT is
-    slow, though: every tile request decompresses whole source strips again
-    (scanned plans are typically stored one row per strip). So the VRT is read
-    once into a temporary GeoTIFF, in horizontal stripes by parallel
-    gdal_translate processes; each stripe touches only its own source rows.
+    The warp stays a VRT that the tile workers read directly: gdalwarp writing
+    to a file samples differently (measured: 8 % of pixels off by up to 82
+    against an exact `-et 0` warp, whereas the VRT stays within 1).
 
-    Clipping happens per stripe, in the target grid, by burning the polygon into
-    the alpha band (gdal_rasterize, pixel-centre rule). gdalwarp would evaluate a
-    cutline in the pixel space of its *source*, so neighbours clipped by one
-    shared boundary would overlap or leave one-pixel cracks; in one common grid
-    every pixel centre belongs to exactly one of them.
+    The cutline is not given to gdalwarp, which evaluates it in the pixel space
+    of its *source*: neighbours clipped by one shared boundary would overlap or
+    leave one-pixel cracks. The workers burn it in the target grid instead,
+    where every pixel centre belongs to exactly one of them.
     """
     res = WORLD / (args.tile_size * 2 ** zoom)
     cmd = ["gdalwarp", "-q", "-overwrite", "-of", "VRT", "-t_srs", "EPSG:3857", "-tr", repr(res), repr(res),
@@ -180,98 +220,222 @@ def warp(src, work, zoom, resampling, args):
         cmd += ["-tap"]
     aligned = work / "aligned.vrt"
     run(cmd + [src, aligned], args)
-    meta = info(aligned, args)
+    return aligned, cut
+
+
+def tile_layout(meta, zoom, tile_size):
+    """Pixel offset of the warp in the zoom's world raster and its XYZ tile range."""
+    gt = meta["geoTransform"]
     width, height = meta["size"]
-    alpha = len(meta["bands"])  # -dstalpha appends alpha as the last band
-    count = min(args.threads, math.ceil(height / STRIPE_ROWS))
-    step = math.ceil(height / count / STRIPE_ROWS) * STRIPE_ROWS
-
-    def stripe(y):
-        out = work / f"stripe_{y:09d}.tif"
-        run(["gdal_translate", "-q", "-srcwin", 0, y, width, min(step, height - y),
-             "--config", "GDAL_CACHEMAX", "256", "-co", "TILED=YES", "-co", "BLOCKXSIZE=512",
-             "-co", "BLOCKYSIZE=512", "-co", "COMPRESS=ZSTD", "-co", "ZSTD_LEVEL=1", "-co", "BIGTIFF=IF_SAFER",
-             aligned, out], args)
-        if cut:
-            run(["gdal_rasterize", "-q", "-i", "-b", alpha, "-burn", "0", "-l", "cutline", cut, out], args)
-        return out
-
-    with ThreadPoolExecutor(max_workers=count) as pool:
-        stripes = list(pool.map(stripe, range(0, height, step)))
-    out = work / "materialized.vrt"
-    run(["gdalbuildvrt", "-q", out, *stripes], args)
-    return out
+    res = gt[1]
+    px0 = round((gt[0] + WORLD / 2) / res)
+    py0 = round((WORLD / 2 - gt[3]) / res)
+    return {"zoom": zoom, "tile_size": tile_size, "res": res, "origin": (gt[0], gt[3]),
+            "px0": px0, "py0": py0, "width": width, "height": height,
+            "tx0": px0 // tile_size, "tx1": (px0 + width - 1) // tile_size,
+            "ty0": py0 // tile_size, "ty1": (py0 + height - 1) // tile_size}
 
 
-def pack(tiles_dir, output, args, zoom, bounds, settings):
-    """Write gdal tiles into a flat MBTiles; return statistics."""
+def encode_tile(im, enc):
+    """RGBA image -> tile bytes: lossless WebP/PNG, or lossy WebP when enc['quality'] is set."""
+    out = io.BytesIO()
+    if enc["format"] == "png":
+        im.save(out, "PNG", compress_level=enc["png_compress_level"])
+    elif enc["quality"] is None:
+        im.save(out, "WEBP", lossless=True, exact=True, method=enc["webp_method"])
+    else:
+        im.save(out, "WEBP", quality=enc["quality"], method=enc["webp_method"])  # alpha stays lossless
+    return out.getvalue()
+
+
+def overview_tile(job, tile_size, enc):
+    """One parent from its four children: premultiplied exact 2x2 average, as `merge` builds its pyramid."""
     from PIL import Image
-    tmp = output.with_name(output.name + ".tmp")
-    tmp.unlink(missing_ok=True)
-    stats = {"tiles": 0, "empty_skipped": 0, "binary_alpha_tiles": 0, "reencoded": 0}
-    db = sqlite3.connect(tmp)
+    z, x, y, children = job
+    with Image.new("RGBA", (tile_size * 2, tile_size * 2)) as canvas:
+        for (dx, dy), data in zip(CHILD_OFFSETS, children):
+            if data is not None:  # a missing quadrant stays transparent
+                with Image.open(io.BytesIO(data)) as child:
+                    canvas.paste(child.convert("RGBA"), (dx * tile_size, (1 - dy) * tile_size))
+        with canvas.convert("RGBa") as premultiplied, premultiplied.reduce(2) as reduced:
+            with reduced.convert("RGBA") as result:
+                return z, x, y, encode_tile(result, enc)
+
+
+def encoding(args):
+    """Picklable encoder settings shared by base and overview workers."""
+    return {"format": args.format, "quality": args.quality, "webp_method": args.webp_method,
+            "png_compress_level": args.png_compress_level}
+
+
+def tile_rows_worker(jobs, results, cfg):
+    """Worker process: rectangles (c0, c1, r0, r1) from `jobs` -> encoded TMS tiles on `results`."""
     try:
-        db.execute(f"PRAGMA page_size={args.page_size}")
-        db.execute("PRAGMA journal_mode=DELETE")
-        db.executescript("""
-            CREATE TABLE metadata(name TEXT PRIMARY KEY, value TEXT NOT NULL);
-            CREATE TABLE tiles(zoom_level INTEGER NOT NULL, tile_column INTEGER NOT NULL,
-              tile_row INTEGER NOT NULL, tile_data BLOB NOT NULL);
-            CREATE UNIQUE INDEX tile_index ON tiles(zoom_level, tile_column, tile_row);""")
-        ext = "webp" if args.format == "webp" else "png"
-        zooms = set()
-        for z_dir in sorted(tiles_dir.iterdir(), key=lambda p: int(p.name) if p.name.isdigit() else -1):
-            if not z_dir.name.isdigit():
-                continue
-            for x_dir in z_dir.iterdir():
-                for f in x_dir.glob(f"*.{ext}"):
-                    data = f.read_bytes()
-                    z, x, y = int(z_dir.name), int(x_dir.name), int(f.stem)
-                    with Image.open(io.BytesIO(data)) as im:
-                        rgba = im.convert("RGBA")
-                    alpha = rgba.getchannel("A")
-                    low, high = alpha.getextrema()
-                    if high == 0 and not args.keep_empty:
-                        stats["empty_skipped"] += 1
-                        continue
-                    changed = False
-                    # Only the base level is merged; previews below it keep smooth averaged edges.
-                    if (args.binary_alpha and z == zoom and (low, high) != (255, 255)
-                            and any(alpha.histogram()[1:255])):
-                        rgba.putalpha(alpha.point(lambda a: 255 if a >= args.binary_alpha else 0))
-                        stats["binary_alpha_tiles"] += 1
-                        changed = True
-                        if rgba.getchannel("A").getextrema()[1] == 0 and not args.keep_empty:
+        import signal
+
+        import numpy as np
+        from osgeo import gdal, ogr
+        from PIL import Image
+
+        signal.signal(signal.SIGINT, signal.SIG_IGN)  # the parent stops workers
+        gdal.UseExceptions()
+        gdal.SetCacheMax(WORKER_CACHE_MIB * 1024 * 1024)
+        ds = gdal.Open(cfg["vrt"])
+        bands = ds.RasterCount
+        cut_ds = ogr.Open(cfg["cut"]) if cfg["cut"] else None
+        layer = cut_ds.GetLayer("cutline") if cut_ds else None
+        mem = gdal.GetDriverByName("MEM")
+        ts, res, (ox, oy) = cfg["tile_size"], cfg["res"], cfg["origin"]
+        px0, py0, width, height = cfg["px0"], cfg["py0"], cfg["width"], cfg["height"]
+        top_row = 2 ** cfg["zoom"] - 1
+        threshold = cfg["binary_alpha"]
+
+        def encode(pixels):
+            return encode_tile(Image.fromarray(np.ascontiguousarray(pixels), "RGBA"), cfg)
+
+        while (job := jobs.get()) is not None:
+            c0, c1, r0, r1 = job
+            x = c0 * ts - px0
+            rx0, rx1 = max(0, x), min(width, c1 * ts - px0)
+            for ty in range(r0, r1):
+                y = ty * ts - py0
+                ry0, ry1 = max(0, y), min(height, y + ts)
+                tiles, stats = [], {"empty_skipped": 0, "binary_alpha_tiles": 0}
+                canvas = np.zeros((ts, (c1 - c0) * ts, 4), np.uint8)
+                view = canvas[ry0 - y:ry1 - y, rx0 - x:rx1 - x]
+                data = ds.ReadAsArray(rx0, ry0, rx1 - rx0, ry1 - ry0)
+                if bands == 2:  # gray + alpha
+                    view[..., :3] = data[0][..., None]
+                    view[..., 3] = data[1]
+                else:
+                    view[...] = data.transpose(1, 2, 0)
+                del data
+                if layer is not None:
+                    mask = mem.Create("", rx1 - rx0, ry1 - ry0, 1, gdal.GDT_Byte)
+                    mask.SetGeoTransform((ox + rx0 * res, res, 0, oy - ry0 * res, 0, -res))
+                    gdal.RasterizeLayer(mask, [1], layer, burn_values=[255])  # pixel-centre rule
+                    np.minimum(view[..., 3], mask.ReadAsArray(), out=view[..., 3])
+                for i in range(c1 - c0):
+                    pixels = canvas[:, i * ts:(i + 1) * ts]
+                    alpha = pixels[..., 3]
+                    if not alpha.any():
+                        if not cfg["keep_empty"]:
                             stats["empty_skipped"] += 1
                             continue
-                    if changed or image_format(data) != args.format or (
-                            args.format == "webp" and not lossless_webp(data)):
-                        out = io.BytesIO()
-                        if args.format == "webp":
-                            rgba.save(out, "WEBP", lossless=True, exact=True, method=args.webp_method)
-                        else:
-                            rgba.save(out, "PNG", compress_level=args.png_compress_level)
-                        data = out.getvalue()
-                        stats["reencoded"] += 1
-                    db.execute("INSERT INTO tiles VALUES(?,?,?,?)", (z, x, y, data))
-                    stats["tiles"] += 1
-                    zooms.add(z)
-        if not zooms:
-            raise TileError("No nonempty tiles: the input is fully transparent after nodata/cutline handling")
-        meta = {"name": args.name or output.stem, "format": args.format, "type": "overlay", "version": "1.3",
-                "scheme": "tms", "minzoom": str(min(zooms)), "maxzoom": str(max(zooms)),
-                "mbmerge:tile": json.dumps(settings, ensure_ascii=False),
-                "mbmerge:empty_skipped": str(stats["empty_skipped"])}
-        if bounds:
-            w, s, e, n = bounds
-            meta["bounds"] = f"{w:.8f},{s:.8f},{e:.8f},{n:.8f}"
-            meta["center"] = f"{(w + e) / 2:.8f},{(s + n) / 2:.8f},{zoom}"
-        db.executemany("INSERT INTO metadata VALUES(?,?)", meta.items())
-        db.commit()
+                    elif threshold and ((alpha > 0) & (alpha < 255)).any():
+                        alpha[...] = np.where(alpha >= threshold, 255, 0)
+                        stats["binary_alpha_tiles"] += 1
+                        if not alpha.any() and not cfg["keep_empty"]:
+                            stats["empty_skipped"] += 1
+                            continue
+                    tiles.append((cfg["zoom"], c0 + i, top_row - ty, encode(pixels)))
+                results.put(("tiles", tiles, stats))
+        results.put(("done", None, None))
+    except BaseException:
+        results.put(("error", traceback.format_exc(), None))
+
+
+def write_base(db, vrt, cut, layout, args):
+    """Run the tile workers and insert their tiles; the only writer is this process."""
+    if layout["width"] <= 0 or layout["height"] <= 0:
+        raise TileError("Warped raster is empty")
+    rows = layout["ty1"] - layout["ty0"] + 1
+    columns = layout["tx1"] - layout["tx0"] + 1
+    band = columns if columns <= READ_COLUMNS_MAX else READ_COLUMNS_WIDE
+    bands = [(c, min(c + band, layout["tx1"] + 1)) for c in range(layout["tx0"], layout["tx1"] + 1, band)]
+    step = max(1, math.ceil(rows * len(bands) / (args.threads * JOBS_PER_WORKER)))
+    rectangles = [(c0, c1, r, min(r + step, layout["ty1"] + 1))
+                  for c0, c1 in bands for r in range(layout["ty0"], layout["ty1"] + 1, step)]
+    workers = min(args.threads, len(rectangles))
+    ctx = multiprocessing.get_context("spawn")
+    jobs, results = ctx.Queue(), ctx.Queue(maxsize=2 * workers)  # bounded: a slow writer slows the workers
+    for rectangle in rectangles:
+        jobs.put(rectangle)
+    for _ in range(workers):
+        jobs.put(None)
+    cfg = {**layout, **encoding(args), "vrt": str(vrt), "cut": str(cut) if cut else None,
+           "binary_alpha": args.binary_alpha, "keep_empty": args.keep_empty}
+    procs = [ctx.Process(target=tile_rows_worker, args=(jobs, results, cfg), daemon=True) for _ in range(workers)]
+    stats = {"tiles": 0, "empty_skipped": 0, "binary_alpha_tiles": 0}
+    total, done_rows, start, last_log = rows * len(bands), 0, time.monotonic(), time.monotonic()
+    for p in procs:
+        p.start()
+    try:
+        finished = 0
+        while finished < workers:
+            try:
+                kind, payload, counts = results.get(timeout=5)
+            except queue.Empty:
+                dead = [p.exitcode for p in procs if p.exitcode not in (None, 0)]
+                if dead:
+                    raise TileError(f"Tile worker died (exit code {dead[0]}; out of memory?)") from None
+                continue
+            if kind == "error":
+                raise TileError("Tile worker failed: " + " | ".join(payload.strip().splitlines()[-3:]))
+            if kind == "done":
+                finished += 1
+                continue
+            db.executemany("INSERT INTO tiles VALUES(?,?,?,?)", payload)
+            db.commit()
+            stats["tiles"] += len(payload)
+            for key, value in counts.items():
+                stats[key] += value
+            done_rows += 1
+            if time.monotonic() - last_log >= PROGRESS_SECONDS:
+                elapsed = time.monotonic() - start
+                log(args, "tiling", zoom=layout["zoom"], rows_done=done_rows, rows=total, tiles=stats["tiles"],
+                    tiles_per_s=round(stats["tiles"] / elapsed, 1), seconds=round(elapsed))
+                last_log = time.monotonic()
     finally:
-        db.close()
-    os.replace(tmp, output)
+        for p in procs:
+            if p.is_alive():
+                p.terminate()
+            p.join()
+    log(args, "base", zoom=layout["zoom"], workers=workers, seconds=round(time.monotonic() - start, 1), **stats)
     return stats
+
+
+def children_of(db, z, x, y):
+    """The four child blobs of parent z/x/y (None where missing), in CHILD_OFFSETS order."""
+    out = []
+    for dx, dy in CHILD_OFFSETS:
+        row = db.execute("SELECT tile_data FROM tiles WHERE zoom_level=? AND tile_column=? AND tile_row=?",
+                         (z + 1, 2 * x + dx, 2 * y + dy)).fetchone()
+        out.append(row[0] if row else None)
+    return tuple(out)
+
+
+def write_overviews(db, zoom, min_zoom, args):
+    """Levels zoom-1 .. min_zoom from the level below, as `merge` builds its pyramid.
+
+    The parent reads the children of the next parents while the workers encode,
+    with at most OVERVIEW_INFLIGHT jobs per worker submitted at a time.
+    """
+    written = 0
+    ctx = multiprocessing.get_context("spawn")
+    with ProcessPoolExecutor(max_workers=args.threads, mp_context=ctx, initializer=worker_init) as pool:
+        for z in range(zoom - 1, min_zoom - 1, -1):
+            start = time.monotonic()
+            parents = db.execute("SELECT DISTINCT tile_column / 2, tile_row / 2 FROM tiles WHERE zoom_level = ?",
+                                 (z + 1,)).fetchall()
+            pending, rows = deque(), []
+
+            def drain(limit):
+                while len(pending) > limit:
+                    rows.append(pending.popleft().result())
+                if len(rows) >= OVERVIEW_COMMIT or (limit == 0 and rows):
+                    db.executemany("INSERT INTO tiles VALUES(?,?,?,?)", rows)
+                    db.commit()
+                    rows.clear()
+
+            for x, y in parents:
+                pending.append(pool.submit(overview_tile, (z, x, y, children_of(db, z, x, y)), args.tile_size,
+                                           encoding(args)))
+                drain(OVERVIEW_INFLIGHT * args.threads)
+            drain(0)
+            written += len(parents)
+            log(args, "overviews", zoom=z, tiles=len(parents), seconds=round(time.monotonic() - start, 1))
+    return written
 
 
 def wgs84_bounds(path, args):
@@ -283,8 +447,48 @@ def wgs84_bounds(path, args):
     return min(xs), min(ys), max(xs), max(ys)
 
 
+def write_mbtiles(output, vrt, cut, zoom, min_zoom, args, settings):
+    """Base tiles, overviews and metadata into `output` (via a temporary file and rename)."""
+    tmp = output.with_name(output.name + ".tmp")
+    tmp.unlink(missing_ok=True)
+    layout = tile_layout(info(vrt, args), zoom, args.tile_size)
+    db = sqlite3.connect(tmp)
+    try:
+        db.execute(f"PRAGMA page_size={args.page_size}")
+        db.execute("PRAGMA synchronous=OFF")  # a crash leaves only the .tmp file, which is discarded
+        db.executescript("""
+            CREATE TABLE metadata(name TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE tiles(zoom_level INTEGER NOT NULL, tile_column INTEGER NOT NULL,
+              tile_row INTEGER NOT NULL, tile_data BLOB NOT NULL);
+            CREATE UNIQUE INDEX tile_index ON tiles(zoom_level, tile_column, tile_row);""")
+        stats = write_base(db, vrt, cut, layout, args)
+        if not stats["tiles"]:
+            raise TileError("No nonempty tiles: the input is fully transparent after nodata/cutline handling")
+        stats["overview_tiles"] = write_overviews(db, zoom, min_zoom, args) if min_zoom < zoom else 0
+        meta = {"name": args.name or output.stem, "format": args.format, "type": "overlay", "version": "1.3",
+                "scheme": "tms", "minzoom": str(min_zoom), "maxzoom": str(zoom),
+                "mbmerge:tile": json.dumps(settings, ensure_ascii=False),
+                "mbmerge:empty_skipped": str(stats["empty_skipped"])}
+        bounds = wgs84_bounds(vrt, args)
+        if bounds:
+            w, s, e, n = bounds
+            meta["bounds"] = f"{w:.8f},{s:.8f},{e:.8f},{n:.8f}"
+            meta["center"] = f"{(w + e) / 2:.8f},{(s + n) / 2:.8f},{zoom}"
+        db.executemany("INSERT INTO metadata VALUES(?,?)", meta.items())
+        db.commit()
+    except BaseException:
+        db.close()
+        tmp.unlink(missing_ok=True)
+        raise
+    db.close()
+    os.replace(tmp, output)
+    return stats
+
+
 def tile(args):
-    """`mbmerge tile`: inputs -> lossless flat MBTiles for `mbmerge merge`."""
+    """`mbmerge tile`: inputs -> flat MBTiles for `mbmerge merge`."""
+    if args.quality is not None and args.format != "webp":
+        raise TileError("--quality selects lossy WebP; it cannot be combined with --format png")
     version = gdal_version()
     output = Path(args.output).expanduser().resolve()
     if output.exists() and not args.overwrite:
@@ -311,30 +515,22 @@ def tile(args):
         resampling = args.resampling
         if resampling == "auto":
             resampling = "average" if native < target / 1.2 else "bilinear"
-        warped = warp(src, work, zoom, resampling, args)
-        tiles_dir = work / "tiles"
-        cmd = ["gdal", "raster", "tile", "--min-zoom", min_zoom, "--max-zoom", zoom,
-               "--tile-size", args.tile_size, "--convention", "tms",
-               "-r", "nearest", "--overview-resampling", "average",
-               "--format", "WEBP" if args.format == "webp" else "PNG",
-               "--skip-blank", "--webviewer", "none", "--num-threads", args.threads]
-        if args.format == "webp":
-            cmd += ["--co", "LOSSLESS=YES", "--co", f"METHOD={args.webp_method}"]
-        run(cmd + [warped, tiles_dir], args)
+        warped, cut = warp(src, work, zoom, resampling, args)
         settings = {"gdal": version, "zoom": zoom, "min_zoom": min_zoom, "tile_size": args.tile_size,
                     "native_resolution_m": round(native, 4), "resampling": resampling,
-                    "format": args.format, "lossless": True, "pdf_dpi": args.pdf_dpi,
+                    "format": args.format, "lossless": args.quality is None, "quality": args.quality,
+                    "pdf_dpi": args.pdf_dpi, "s_srs": args.s_srs,
                     "nodata": [list(c) for c in args.nodata],
                     "collar": [list(c) for c in args.collar], "near": args.near if args.collar else None,
                     "binary_alpha": args.binary_alpha, "cutline": bool(args.cutline), "cwhere": args.cwhere,
                     "inputs": len(files)}
-        stats = pack(tiles_dir, output, args, zoom, wgs84_bounds(warped, args), settings)
+        stats = write_mbtiles(output, warped, cut, zoom, min_zoom, args, settings)
     log(args, "tiled", output=output, zoom=zoom, min_zoom=min_zoom, resampling=resampling, **stats)
     return stats
 
 
 def add_parser(sub, positive):
-    t = sub.add_parser("tile", help="georeferenced rasters (TIFF, PDF, VRT, JPEG …) -> lossless MBTiles for merge")
+    t = sub.add_parser("tile", help="georeferenced rasters (TIFF, PDF, VRT, JPEG …) -> MBTiles for merge")
     t.add_argument("inputs", nargs="*", help="input rasters; later inputs are drawn over earlier ones")
     t.add_argument("--input-dir")
     t.add_argument("--pattern", default="*.tif", help="glob within --input-dir; ** supported")
@@ -345,11 +541,16 @@ def add_parser(sub, positive):
     t.add_argument("--min-zoom", type=int, choices=range(31), metavar="Z",
                    help="lowest level to generate (e.g. 0 for previews); default: base zoom only")
     t.add_argument("--tile-size", type=positive, default=512)
-    t.add_argument("--format", choices=("webp", "png"), default="webp", help="always lossless")
+    t.add_argument("--format", choices=("webp", "png"), default="webp", help="lossless unless --quality is given")
+    t.add_argument("--quality", type=int, choices=QUALITY_RANGE, metavar="1-100",
+                   help="lossy WebP at this quality (e.g. 85 for orthophotos); merge would store such tiles "
+                        "losslessly re-encoded, so keep the default lossless output for layers you merge")
     t.add_argument("--webp-method", type=int, choices=range(7), default=4)
     t.add_argument("--png-compress-level", type=int, choices=range(10), default=6)
     t.add_argument("--resampling", choices=RESAMPLING, default="auto",
                    help="auto: average when the source is finer than the target, else bilinear")
+    t.add_argument("--s-srs", metavar="SRS",
+                   help="coordinate system for inputs that have none (world files), e.g. EPSG:5514")
     t.add_argument("--pdf-dpi", type=positive, default=300)
     t.add_argument("--cutline", help="polygon file (any OGR format); pixels outside become transparent")
     t.add_argument("--cutline-layer")
@@ -363,8 +564,10 @@ def add_parser(sub, positive):
                    help="snap partial alpha to 0/255 (default threshold 128) so overlaying again is idempotent")
     t.add_argument("--keep-empty", action="store_true", help="store fully transparent tiles")
     t.add_argument("--page-size", type=int, choices=(1024, 2048, 4096, 8192, 16384, 32768, 65536), default=4096)
-    t.add_argument("--threads", type=positive, default=min(8, os.cpu_count() or 1))
-    t.add_argument("--work-dir", help="directory for temporary files (default: system temp)")
+    t.add_argument("--threads", type=positive, default=min(8, os.cpu_count() or 1),
+                   help="worker processes (each reads and encodes its own rows of tiles)")
+    t.add_argument("--work-dir", help="directory for temporary files: rasterized PDFs, collar masks, VRTs "
+                                      "(default: system temp)")
     t.add_argument("--name")
     t.add_argument("--json-log", action="store_true")
     t.set_defaults(func=tile)

@@ -427,9 +427,11 @@ def process_overview(job, tile_size, method, max_blob, output_format="webp",
                      png_compress_level=6, source_format=None, keep_empty=False):
     """Build one parent from four CURRENT children, never overlay an old parent.
 
-    BOX is a 2x2 area average without a filter halo, so four children suffice.
-    Premultiplied alpha prevents invisible RGB from bleeding into visible edges.
-    Work is bounded by one 2S x 2S canvas and the codec's temporary buffers.
+    reduce(2) is an exact 2x2 area average with rounding, without a filter
+    halo, so four children suffice. (A BOX resize rounds up by half a level on
+    average, which accumulates down the pyramid.) Premultiplied alpha prevents
+    invisible RGB from bleeding into visible edges. Work is bounded by one
+    2S x 2S canvas and the codec's temporary buffers.
     """
     from PIL import Image
     z, x, y, children = job
@@ -443,7 +445,7 @@ def process_overview(job, tile_size, method, max_blob, output_format="webp",
                         raise MergeError("Managed output contains lossy WebP")
                     canvas.paste(child, (dx * tile_size, (1 - dy) * tile_size))
             with canvas.convert("RGBa") as premultiplied:
-                with premultiplied.resize((tile_size, tile_size), Image.Resampling.BOX) as reduced:
+                with premultiplied.reduce(2) as reduced:
                     with reduced.convert("RGBA") as result:
                         return z, x, y, encode(result, output_format, method, png_compress_level, max_blob)
     except Exception as e:

@@ -102,7 +102,7 @@ Publikovatelný je pouze complete. Během běhu mohou čtenáři vidět nový de
 
 `process_tile` ověří každou importovanou dlaždici. Jedinečné shodné PNG se kopíruje; WebP jen tehdy, pokud validované RIFF chunky obsahují bezztrátové VP8L RGB. Ztrátové VP8 se i bez překryvu bezztrátově překóduje. Zachovají se dekódované pixely, nikoli původně ztracený detail. Překryvy používají `Image.alpha_composite(existing,new)`.
 
-`process_overview` vloží potomky do RGBA plátna `2S × 2S`. TMS dy=1 je sever a má obrazové y=0; dy=0 má y=S. Následuje přednásobené `RGBa`, BOX zmenšení dvakrát, převod do RGBA a kódování. BOX nepotřebuje okolí mimo čtyři potomky. Filtr s větším dosahem by vyžadoval okolní pixely a nové testy švů; nestačí vyměnit konstantu filtru.
+`process_overview` vloží potomky do RGBA plátna `2S × 2S`. TMS dy=1 je sever a má obrazové y=0; dy=0 má y=S. Následuje přednásobené `RGBa`, `reduce(2)` (přesný průměr 2×2 se zaokrouhlením), převod do RGBA a kódování. BOX zmenšení dává tentýž plošný průměr, ale v průměru zaokrouhluje o půl stupně nahoru a o čtyři úrovně níž to dělalo asi 2 stupně; uložený název `box-premultiplied-alpha` zůstává, protože metoda je stejná. Nepotřebuje okolí mimo čtyři potomky. Filtr s větším dosahem by vyžadoval okolní pixely a nové testy švů; nestačí vyměnit konstantu filtru.
 
 PNG má uloženou úroveň komprese, WebP `lossless=True, exact=True`. Původní bezztrátové shodné bajty mohou mít vlastní kompresní úsilí. Bezztrátové kódování neodstraní zaokrouhlování osmibitového výpočtu. `verify --decode` odmítne zvenku vložené ztrátové WebP.
 

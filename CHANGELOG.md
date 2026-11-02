@@ -15,7 +15,7 @@
 ### Added and corrected
 
 - `--mode overlay` retains the previous supplied-zoom compositing workflow for new outputs.
-- Persisted, deduplicated dirty parents; bottom-up regeneration from four current children with correct TMS quadrant placement and premultiplied-alpha BOX averaging.
+- Persisted, deduplicated dirty parents; bottom-up regeneration from four current children with correct TMS quadrant placement and a premultiplied-alpha 2×2 area average (`reduce(2)`; a BOX resize rounded up by half a level per level).
 - Atomic parent images, dirty-key removal, ancestor scheduling and progress, with resume after failure or interruption in either phase.
 - Incremental updates regenerate only affected ancestors; parents never accumulate old overview imagery.
 - All output encoding is lossless. Unique lossy WebP is transcoded instead of copied, and `verify --decode` detects lossy WebP externally inserted into a managed archive.
@@ -26,7 +26,7 @@
 - Publishing instructions explicitly distinguish repository enable variables from environment variables.
 - `merge --reimport changed|always` overlays listed, already imported sources again over the current output (a new version of the same file, or an unchanged one) and regenerates affected ancestors; crash recovery never applies a committed batch twice. For sources with 0/255 alpha whose new version covers the old one the result equals a clean rebuild, and repeating it changes nothing.
 - `merge --verify-recorded stat` checks recorded sources by stat fingerprint and hashes only those whose stat changed, for pipelines that append one source at a time to a large history.
-- New `mbmerge tile` (needs GDAL ≥ 3.11 command-line tools): GeoTIFF/PDF/VRT/JPEG → flat lossless MBTiles for `merge`. PDF rasterization, collars (`--collar`, like `nearblack`) and exact colors (`--nodata`) turned into alpha before resampling, warp into the grid of the chosen zoom and polygon clipping **in that target grid**, so neighbours clipped by a shared boundary neither overlap nor leave cracks; `--binary-alpha`, empty-tile skipping, optional overviews for previews. The warp is read once into a temporary GeoTIFF in parallel stripes (`--threads`), so sources stored one row per strip are not decompressed again for every tile; `--webp-method` applies to GDAL-encoded tiles too.
+- New `mbmerge tile` (needs GDAL ≥ 3.11: command-line tools and the same version of its Python bindings, with numpy): GeoTIFF/PDF/VRT/JPEG → flat MBTiles for `merge`, lossless by default. PDF rasterization, collars (`--collar`, like `nearblack`) and exact colors (`--nodata`) turned into alpha before resampling, warp into the grid of the chosen zoom and polygon clipping **in that target grid**, so neighbours clipped by a shared boundary neither overlap nor leave cracks; `--binary-alpha`, empty-tile skipping, optional overviews for previews. Worker processes (`--threads`) read the warp in rectangles row by row and write tiles straight into the MBTiles, with no stripes or tile directories on disk, so sources stored one row per strip are not decompressed again for every tile. Inputs without a coordinate system (world files) are refused unless `--s-srs` names one, instead of being read as Web Mercator metres. `--quality` writes lossy WebP for imagery that is not merged (orthophotos: 5× faster to encode, 8× smaller). Progress is logged every 30 s.
 - Minimum Pillow is 10.4 (tests pass with 10.4 and 13).
 
 ### Unchanged limits
