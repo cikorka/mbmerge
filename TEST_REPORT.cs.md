@@ -2,7 +2,7 @@
 
 [English](TEST_REPORT.md) | **Čeština**
 
-Zpráva se týká **mbmerge 2.0.0 / schéma 3**, včetně sloučení základní úrovně a následné tvorby nižších zoomů. Místní prostředí: macOS ARM64, Python 3.12.14, SQLite 3.53.1, Pillow 12.3.0, libwebp 1.6.0. Test nainstalované distribuce používá také Pillow 13.0.0. Vstupy jsou syntetické; reálná 1TB kolekce nebyla otestována.
+Zpráva se týká **mbmerge 2.1.0 / schéma 3**, včetně sloučení základní úrovně a následné tvorby nižších zoomů. Místní prostředí: macOS ARM64, Python 3.12.14, SQLite 3.53.1, Pillow 12.3.0, libwebp 1.6.0. Test nainstalované distribuce používá také Pillow 13.0.0. Vstupy jsou syntetické; reálná 1TB kolekce nebyla otestována.
 
 ## Správnost a obnova
 
@@ -56,7 +56,7 @@ První pokus ve workspace zastavila změna fingerprintu vstupu před dokončení
 
 ## Distribuce a dokumentace
 
-Wheel/sdist prošly strict Twine a kontrolou identity/obsahu/tagu v2.0.0. Chybný tag se odmítá. Přímý wheel i wheel znovu sestavený ze sdistu prošly izolovaným testem instalovaného CLI mimo checkout: skutečné workery, smíšené 512px vstupy, oba bezztrátové kodéry, celá pyramida, přesné základní pixely, TMS, metadata, replay a dekódování. Místně byly ověřeny EN/CS odkazy a obrázky README.
+Wheel/sdist prošly strict Twine a kontrolou identity/obsahu/tagu v2.1.0. Chybný tag se odmítá. Přímý wheel i wheel znovu sestavený ze sdistu prošly izolovaným testem instalovaného CLI mimo checkout: skutečné workery, smíšené 512px vstupy, oba bezztrátové kodéry, celá pyramida, přesné základní pixely, TMS, metadata, replay a dekódování. Místně byly ověřeny EN/CS odkazy a obrázky README.
 
 Výsledky GitHub-hosted CI jsou v Actions kontrolách větve/PR. Místní výsledky netvrdí dostupnost všech podporovaných runnerů na tomto stroji. Validace nevytváří release tag, GitHub Release ani upload na PyPI/TestPyPI.
 

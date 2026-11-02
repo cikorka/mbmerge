@@ -1,4 +1,4 @@
-mbmerge 2.0.0 — Linux x86_64 suite in the maplo-backend image: Python 3.11.2, SQLite 3.40.1, Pillow 10.4.0, GDAL 3.11.4 (tile tests included; 48 tests)
+mbmerge 2.1.0 — Linux x86_64 suite in the maplo-backend image: Python 3.11.2, SQLite 3.40.1, Pillow 10.4.0, GDAL 3.11.4 (tile tests included; 48 tests)
 
 test_alpha_priority_tms_metadata_and_incremental (test_merge.MergeTests.test_alpha_priority_tms_metadata_and_incremental) ... ok
 test_blocked_wal_checkpoint_stops_then_resumes (test_merge.MergeTests.test_blocked_wal_checkpoint_stops_then_resumes) ... ok
@@ -12,8 +12,8 @@ test_reject_corrupt_unique_tiles_sizes_coords_and_schema (test_merge.MergeTests.
 test_reject_oversized_blob_before_fetch_and_decoder_bomb (test_merge.MergeTests.test_reject_oversized_blob_before_fetch_and_decoder_bomb) ... ok
 test_sigkill_before_and_after_commit_exact_resume_and_active_order (test_merge.MergeTests.test_sigkill_before_and_after_commit_exact_resume_and_active_order) ... ok
 test_source_mutation_marks_tainted_and_blocks_resume (test_merge.MergeTests.test_source_mutation_marks_tainted_and_blocks_resume) ... plan: mode=overlay base_zoom=None min_zoom=0 new_or_active=1 reimport=0 skipped=0 workers=1
-bounds_fallback: path=/tmp/tmp2iucck9k/a.mbtiles reason=missing/invalid bounds; using whole TMS tile extents
-import: path=/tmp/tmp2iucck9k/a.mbtiles resumed_tiles=0
+bounds_fallback: path=/tmp/tmpvy4i9syf/a.mbtiles reason=missing/invalid bounds; using whole TMS tile extents
+import: path=/tmp/tmpvy4i9syf/a.mbtiles resumed_tiles=0
 progress: path=a.mbtiles tiles=1 overlaps=0 batch_bytes=4194344 peak_inflight=1
 ok
 test_wal_input_refused (test_merge.MergeTests.test_wal_input_refused) ... ok
@@ -55,6 +55,6 @@ test_quality_writes_lossy_webp_at_every_level (test_tile.TileTests.test_quality_
 test_world_file_without_srs_is_refused_unless_s_srs_is_given (test_tile.TileTests.test_world_file_without_srs_is_refused_unless_s_srs_is_given) ... ok
 
 ----------------------------------------------------------------------
-Ran 48 tests in 70.029s
+Ran 48 tests in 68.078s
 
 OK

@@ -46,7 +46,7 @@ import zlib
 
 # Program and on-disk schema versions are independent. Bump the schema when
 # older clients must refuse outputs they can no longer interpret safely.
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 SCHEMA_VERSION = 3
 MIB = 1024 * 1024
 MERCATOR_LAT = 85.0511287798066

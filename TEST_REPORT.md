@@ -2,7 +2,7 @@
 
 **English** | [Čeština](TEST_REPORT.cs.md)
 
-This report covers **mbmerge 2.0.0 / schema 3**, including base-level merge followed by bottom-up overview generation. Local host: macOS ARM64, Python 3.12.14, SQLite 3.53.1, Pillow 12.3.0, libwebp 1.6.0. Installed-distribution smoke checks also use Pillow 13.0.0. All inputs are synthetic. A real 1 TB collection has not been tested.
+This report covers **mbmerge 2.1.0 / schema 3**, including base-level merge followed by bottom-up overview generation. Local host: macOS ARM64, Python 3.12.14, SQLite 3.53.1, Pillow 12.3.0, libwebp 1.6.0. Installed-distribution smoke checks also use Pillow 13.0.0. All inputs are synthetic. A real 1 TB collection has not been tested.
 
 ## Automated correctness and recovery
 
@@ -56,7 +56,7 @@ An early workspace-based attempt stopped when an input fingerprint changed befor
 
 ## Distribution and documentation checks
 
-Wheel and sdist passed strict Twine metadata validation and `check_release.py` identity/content/tag checks for v2.0.0. A wrong version tag is refused. Installation of the wheel and a wheel rebuilt from sdist passed the isolated installed-CLI test outside the checkout, using real workers, mixed 512px sources, both lossless encoders, a complete pyramid, exact base pixels, TMS checks, metadata, replay and full output decoding. English/Czech links and illustrated README assets were checked locally.
+Wheel and sdist passed strict Twine metadata validation and `check_release.py` identity/content/tag checks for v2.1.0. A wrong version tag is refused. Installation of the wheel and a wheel rebuilt from sdist passed the isolated installed-CLI test outside the checkout, using real workers, mixed 512px sources, both lossless encoders, a complete pyramid, exact base pixels, TMS checks, metadata, replay and full output decoding. English/Czech links and illustrated README assets were checked locally.
 
 GitHub-hosted CI results are available through the branch/PR Actions checks. The recorded local results above do not claim every supported runner was locally available. No release tag, GitHub Release, PyPI or TestPyPI upload is performed by these validation commands.
 
