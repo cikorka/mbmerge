@@ -2,7 +2,21 @@
 
 [English](CHANGELOG.md) | **Čeština**
 
-## 2.0.0 — nevydáno
+## 2.1.0 — nevydáno
+
+### Změny
+
+- `mbmerge tile` zapisuje základní dlaždice rovnou do MBTiles. Pracovní procesy (`--threads`) čtou warp po obdélnících řádek po řádku (u úzkých rastrů po celé šířce, u širokých mozaik v pruzích po 16 dlaždicích), ořez vypálí do alfy v cílové mřížce a kódují; jediným zapisovatelem do SQLite je rodič. Na disku nevznikají dočasné pásy ani adresáře dlaždic. Základní dlaždice územních plánů jsou pixelově shodné s 2.0.0; ortofoto z 12 JPEG listů do z19 trvalo 536 s místo 780 s.
+- `mbmerge tile` nově potřebuje i Python bindingy GDAL (`osgeo`) stejné verze jako příkazy GDAL a numpy.
+- Úrovně pyramidy v `merge` i `tile` počítá přednásobené `reduce(2)` místo BOX zmenšení, jehož zaokrouhlení posouvalo každou úroveň o +0,5 (o čtyři zoomy níž asi 2–3 stupně, nyní 0,8–1,2). Nižší zoomy výstupů přestavěných verzí 2.1.0 se proto mírně liší od 2.0.0; základní dlaždice se nemění.
+
+### Novinky
+
+- `tile --quality Q`: ztrátové WebP pro snímky publikované tak, jak jsou (ortofoto: 184 s a 1,0 GB místo 536 s a 6,7 GB). Vrstvy, které se slučují, nech bezztrátové.
+- `tile --s-srs SRS`: vstupy bez souřadnicového systému (world file jako `.jgw`) se bez něj odmítnou; GDAL jejich souřadnice S-JTSK dřív tiše četl jako metry Web Mercatoru.
+- `tile` rozbalí paletové vstupy do RGBA a každých 30 s loguje průběh.
+
+## 2.0.0 — 2026-11-02
 
 ### Nekompatibilní změny
 

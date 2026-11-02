@@ -6,7 +6,7 @@ Build an incremental, lossless raster MBTiles mosaic: **merge the highest source
 
 **Version 2 changes the default behavior.** New outputs use pyramid mode. Existing version 1.x outputs are refused without modification: rebuild into a new output from the original inputs. Use `--mode overlay` explicitly when you want to retain and composite every supplied zoom instead of generating overviews.
 
-Supported: Linux/macOS (POSIX), Python 3.11+, SQLite 3.35+, Pillow 10.4+. Inputs must use the same Web Mercator/TMS grid and square tile size (512 px by default), with a flat indexed `tiles` table. Static PNG and WebP may be mixed. `mbmerge tile` creates such inputs from GDAL rasters (GeoTIFF, PDF, VRT, JPEG …) and additionally needs the GDAL ≥ 3.11 command-line tools. Windows, JPEG tiles, vector tiles, animated images, 16-bit PNG and normalized MBTiles are outside the current scope.
+Supported: Linux/macOS (POSIX), Python 3.11+, SQLite 3.35+, Pillow 10.4+. Inputs must use the same Web Mercator/TMS grid and square tile size (512 px by default), with a flat indexed `tiles` table. Static PNG and WebP may be mixed. `mbmerge tile` creates such inputs from GDAL rasters (GeoTIFF, PDF, VRT, JPEG …) and additionally needs GDAL ≥ 3.11: its command-line tools and the same version of its Python bindings (`osgeo`) with numpy. Windows, JPEG tiles, vector tiles, animated images, 16-bit PNG and normalized MBTiles are outside the current scope.
 
 ## One mosaic, then its pyramid
 
@@ -111,17 +111,17 @@ A fully transparent source tile changes nothing, so `merge` does not store it (n
 ```bash
 mbmerge tile plan.pdf --output plan.mbtiles --zoom 17 --min-zoom 0 \
   --cutline municipalities.shp --cwhere "KOD = '530310'" --binary-alpha
-mbmerge tile --input-dir /data/ortho --pattern '*.jpg' --output ortho.mbtiles \
-  --collar black --collar white --near 15
+mbmerge tile --input-dir /data/ortho --pattern '*.jpg' --s-srs EPSG:5514 --output ortho.mbtiles \
+  --zoom 19 --min-zoom 0 --quality 85 --collar black --collar white --near 15
 ```
 
-The result is a flat, lossless (WebP by default, or `--format png`) TMS MBTiles that `merge` accepts as is; unique tiles are then copied without re-encoding. Steps, all through GDAL command-line tools:
+The result is a flat TMS MBTiles (lossless WebP by default, or `--format png`) that `merge` accepts as is; unique tiles are then copied without re-encoding. `--quality Q` writes lossy WebP instead, for imagery that is published as it is (orthophotos: 5× faster to encode and 8× smaller than lossless); `merge` would store such tiles re-encoded losslessly. Steps:
 
-1. **Per input:** PDF rasterized at `--pdf-dpi` (300). Declared nodata, masks and alpha are always honoured. `--collar COLOR` (repeatable: `black`, `white` or `R,G,B`) makes edge-connected collars transparent like `nearblack -setalpha`, with tolerance `--near` for lossy sources; black or white areas inside the image stay. `--nodata R,G,B` (repeatable) makes an exact color transparent **everywhere** in the input. Both happen before any resampling, so collars cannot blend into valid pixels.
+1. **Per input:** PDF rasterized at `--pdf-dpi` (300). An input without a coordinate system is refused unless `--s-srs` names one: a world file (`.jgw`, `.tfw`) carries the position only, and GDAL would otherwise silently read S-JTSK coordinates as Web Mercator metres. Palettes are expanded to RGBA. Declared nodata, masks and alpha are always honoured. `--collar COLOR` (repeatable: `black`, `white` or `R,G,B`) makes edge-connected collars transparent like `nearblack -setalpha`, with tolerance `--near` for lossy sources; black or white areas inside the image stay. `--nodata R,G,B` (repeatable) makes an exact color transparent **everywhere** in the input. Both happen before any resampling, so collars cannot blend into valid pixels.
 2. Several inputs form one mosaic; later inputs are drawn over earlier ones.
-3. **One warp** to EPSG:3857 at exactly the resolution of `--zoom`, aligned to the tile grid, into a temporary tiled GeoTIFF in `--work-dir` (ZSTD; about 0.1 GB for a 30 000 px municipal plan). The source is read once and sequentially, which matters for scans stored one row per strip: read through a warped VRT, every tile would decompress whole rows again. `--cutline`/`--cwhere` limit the warp to the polygon's extent and the polygon is then burnt into the alpha band (`gdal_rasterize`, pixel-centre rule) in that same grid. Without `--zoom` the level nearest to the source resolution is used. `--resampling auto` uses `average` when the source is finer than the target, else `bilinear`.
-4. Tiling with `nearest` at the base level (the pixels are already aligned) and `average` for levels down to `--min-zoom` (default: base only; lower levels are for previews, `merge` in pyramid mode ignores them).
-5. Packing: fully transparent tiles are skipped (`--keep-empty` keeps them); `--binary-alpha [T]` snaps partial alpha at the base level to 0/255 at threshold T (128); every tile is verified lossless. Metadata record bounds, zooms and the settings used (`mbmerge:tile`).
+3. **One warp** to EPSG:3857 at exactly the resolution of `--zoom`, aligned to the tile grid, as a VRT limited to the extent of `--cutline`/`--cwhere`. Without `--zoom` the level nearest to the source resolution is used. `--resampling auto` uses `average` when the source is finer than the target, else `bilinear`.
+4. **Base tiles straight into the MBTiles**, nothing staged on disk: `--threads` worker processes each read contiguous rows of tiles from the warp, so every source is read forward (scans and JPEGs stored one row per strip are not decompressed again for every tile). They burn the cutline polygon into alpha in the target grid (pixel-centre rule), skip fully transparent tiles (`--keep-empty` keeps them), snap partial alpha to 0/255 with `--binary-alpha [T]` (threshold 128) and encode losslessly; the parent is the only SQLite writer.
+5. Levels down to `--min-zoom` (default: base only) from the written base, with the same premultiplied 2×2 average as `merge` uses for its pyramid. They are for previews; `merge` in pyramid mode ignores them. Metadata record bounds, zooms and the settings used (`mbmerge:tile`).
 
 Two adjacent sources clipped by the same boundary into the same grid get complementary pixels, so the merged mosaic has no seam and no overlap at that boundary.
 

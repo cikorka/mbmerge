@@ -2,7 +2,21 @@
 
 **English** | [Čeština](CHANGELOG.cs.md)
 
-## 2.0.0 — unreleased
+## 2.1.0 — unreleased
+
+### Changed
+
+- `mbmerge tile` writes base tiles straight into the MBTiles. Worker processes (`--threads`) read the warp in rectangles row by row (full width for narrow rasters, 16-tile bands for wide mosaics), burn the cutline into alpha in the target grid and encode; the parent is the only SQLite writer. No temporary stripes or tile directories on disk. Base tiles of land-use plans are pixel-identical to 2.0.0; an orthophoto of 12 JPEG sheets to z19 took 536 s instead of 780 s.
+- `mbmerge tile` now also needs the GDAL Python bindings (`osgeo`) of the same version as the GDAL command-line tools, and numpy.
+- Pyramid levels in `merge` and `tile` use a premultiplied `reduce(2)` instead of a BOX resize, whose rounding biased each level by +0.5 (about 2–3 levels four zooms down, now 0.8–1.2). Lower zooms of outputs rebuilt with 2.1.0 therefore differ slightly from 2.0.0; base tiles do not change.
+
+### Added
+
+- `tile --quality Q`: lossy WebP for imagery that is published as is (orthophotos: 184 s and 1.0 GB instead of 536 s and 6.7 GB). Layers that are merged should stay lossless.
+- `tile --s-srs SRS`: inputs without a coordinate system (world files such as `.jgw`) are refused unless it is given; GDAL used to read their S-JTSK coordinates silently as Web Mercator metres.
+- `tile` expands palette inputs to RGBA and logs progress every 30 s.
+
+## 2.0.0 — 2026-11-02
 
 ### Breaking changes
 

@@ -6,7 +6,7 @@ Inkrementální bezztrátová rastrová mozaika MBTiles: **nejprve sloučit nejv
 
 **Verze 2 mění výchozí chování.** Nové výstupy používají režim pyramidy. Výstupy verze 1.x se bez změny odmítnou; vytvoř nový výstup z původních zdrojů. Pro zachování a skládání všech dodaných zoomů bez tvorby přehledů zadej výslovně `--mode overlay`.
 
-Podporované prostředí: Linux/macOS (POSIX), Python 3.11+, SQLite 3.35+, Pillow 10.4+. Vstupy musí mít stejnou mřížku Web Mercator/TMS a shodnou čtvercovou velikost dlaždic (výchozí 512 px), plochou indexovanou tabulku `tiles`. Statické PNG a WebP lze kombinovat. Takové vstupy z GDAL rastrů (GeoTIFF, PDF, VRT, JPEG …) vyrobí `mbmerge tile`, který navíc potřebuje příkazy GDAL ≥ 3.11. Windows, JPEG dlaždice, vektorové dlaždice, animace, 16bitové PNG a normalizované MBTiles nejsou podporované.
+Podporované prostředí: Linux/macOS (POSIX), Python 3.11+, SQLite 3.35+, Pillow 10.4+. Vstupy musí mít stejnou mřížku Web Mercator/TMS a shodnou čtvercovou velikost dlaždic (výchozí 512 px), plochou indexovanou tabulku `tiles`. Statické PNG a WebP lze kombinovat. Takové vstupy z GDAL rastrů (GeoTIFF, PDF, VRT, JPEG …) vyrobí `mbmerge tile`, který navíc potřebuje GDAL ≥ 3.11: jeho příkazy a stejnou verzi Python bindingů (`osgeo`) s numpy. Windows, JPEG dlaždice, vektorové dlaždice, animace, 16bitové PNG a normalizované MBTiles nejsou podporované.
 
 ## Společná mozaika a její pyramida
 
@@ -111,17 +111,17 @@ Zcela průhledná zdrojová dlaždice nic nemění, proto ji `merge` neuloží (
 ```bash
 mbmerge tile plan.pdf --output plan.mbtiles --zoom 17 --min-zoom 0 \
   --cutline obce.shp --cwhere "KOD = '530310'" --binary-alpha
-mbmerge tile --input-dir /data/ortofoto --pattern '*.jpg' --output ortofoto.mbtiles \
-  --collar black --collar white --near 15
+mbmerge tile --input-dir /data/ortofoto --pattern '*.jpg' --s-srs EPSG:5514 --output ortofoto.mbtiles \
+  --zoom 19 --min-zoom 0 --quality 85 --collar black --collar white --near 15
 ```
 
-Výsledkem je ploché bezztrátové (výchozí WebP, nebo `--format png`) TMS MBTiles, které `merge` přijme beze změny; jedinečné dlaždice se pak jen zkopírují. Postup, celý přes příkazy GDAL:
+Výsledkem je ploché TMS MBTiles (výchozí bezztrátové WebP, nebo `--format png`), které `merge` přijme beze změny; jedinečné dlaždice se pak jen zkopírují. `--quality Q` místo toho zapíše ztrátové WebP pro snímky, které se publikují tak, jak jsou (ortofoto: 5× rychlejší kódování a 8× menší než bezztrátově); `merge` by takové dlaždice uložil bezztrátově překódované. Postup:
 
-1. **Každý vstup zvlášť:** PDF se rastruje při `--pdf-dpi` (300). Deklarovaná nodata, masky a alfa ze zdroje platí vždy. `--collar BARVA` (opakovatelné: `black`, `white` nebo `R,G,B`) zprůhlední okraj navazující na kraj snímku jako `nearblack -setalpha`, s tolerancí `--near` pro ztrátové zdroje; černé či bílé plochy uvnitř zůstanou. `--nodata R,G,B` (opakovatelné) zprůhlední přesnou barvu **v celém** vstupu. Obojí proběhne před převzorkováním, takže se okraj nerozmaže do platných pixelů.
+1. **Každý vstup zvlášť:** PDF se rastruje při `--pdf-dpi` (300). Vstup bez souřadnicového systému se odmítne, pokud ho neurčí `--s-srs`: world file (`.jgw`, `.tfw`) nese jen polohu a GDAL by jinak souřadnice S-JTSK tiše vzal jako metry Web Mercatoru. Palety se rozbalí do RGBA. Deklarovaná nodata, masky a alfa ze zdroje platí vždy. `--collar BARVA` (opakovatelné: `black`, `white` nebo `R,G,B`) zprůhlední okraj navazující na kraj snímku jako `nearblack -setalpha`, s tolerancí `--near` pro ztrátové zdroje; černé či bílé plochy uvnitř zůstanou. `--nodata R,G,B` (opakovatelné) zprůhlední přesnou barvu **v celém** vstupu. Obojí proběhne před převzorkováním, takže se okraj nerozmaže do platných pixelů.
 2. Víc vstupů tvoří jednu mozaiku; pozdější se kreslí přes dřívější.
-3. **Jeden warp** do EPSG:3857 přesně v rozlišení `--zoom`, zarovnaný na mřížku dlaždic, do dočasného dlaždicovaného GeoTIFF v `--work-dir` (ZSTD; zhruba 0,1 GB na územní plán o 30 000 px). Zdroj se přečte jednou a sekvenčně, což rozhoduje u skenů uložených po řádcích: přes warpované VRT by každá dlaždice znovu dekomprimovala celé řádky. `--cutline`/`--cwhere` omezí warp na obálku polygonu a polygon se pak vypálí do alfa kanálu (`gdal_rasterize`, pravidlo středu pixelu) v téže mřížce. Bez `--zoom` se použije úroveň nejbližší rozlišení zdroje. `--resampling auto` volí `average`, když je zdroj jemnější než cíl, jinak `bilinear`.
-4. Dlaždicování: na základní úrovni `nearest` (pixely už sedí na mřížku), níž `average` až po `--min-zoom` (výchozí jen základní úroveň; nižší jsou pro náhledy, `merge` je v pyramidovém režimu ignoruje).
-5. Balení: zcela průhledné dlaždice se vynechají (`--keep-empty` je ponechá); `--binary-alpha [T]` na základní úrovni zaokrouhlí částečnou alfu na 0/255 podle prahu T (128); každá dlaždice se ověří jako bezztrátová. Metadata nesou rozsah, zoomy a použité nastavení (`mbmerge:tile`).
+3. **Jeden warp** do EPSG:3857 přesně v rozlišení `--zoom`, zarovnaný na mřížku dlaždic, jako VRT omezené na obálku `--cutline`/`--cwhere`. Bez `--zoom` se použije úroveň nejbližší rozlišení zdroje. `--resampling auto` volí `average`, když je zdroj jemnější než cíl, jinak `bilinear`.
+4. **Základní dlaždice rovnou do MBTiles**, bez mezikroků na disku: `--threads` pracovních procesů čte z warpu souvislé řady dlaždic, takže se každý zdroj čte dopředu (skeny a JPEGy uložené po řádcích se nedekomprimují znovu pro každou dlaždici). Polygon ořezu vypálí do alfy v cílové mřížce (pravidlo středu pixelu), zcela průhledné dlaždice vynechají (`--keep-empty` je ponechá), `--binary-alpha [T]` zaokrouhlí částečnou alfu na 0/255 (práh 128) a dlaždice bezztrátově zakódují; jediným zapisovatelem do SQLite je rodič.
+5. Úrovně až po `--min-zoom` (výchozí jen základní) ze zapsaného základu, stejným přednásobeným průměrem 2×2, jakým `merge` počítá pyramidu. Slouží náhledům; `merge` je v pyramidovém režimu ignoruje. Metadata nesou rozsah, zoomy a použité nastavení (`mbmerge:tile`).
 
 Dva sousední zdroje oříznuté stejnou hranicí do stejné mřížky dostanou doplňkové pixely, takže na té hranici nevznikne šev ani překryv.
 
