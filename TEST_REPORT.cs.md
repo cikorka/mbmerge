@@ -2,7 +2,7 @@
 
 [English](TEST_REPORT.md) | **Čeština**
 
-Zpráva se týká **mbmerge 2.1.0 / schéma 3**, včetně sloučení základní úrovně a následné tvorby nižších zoomů. Místní prostředí: macOS ARM64, Python 3.12.14, SQLite 3.53.1, Pillow 12.3.0, libwebp 1.6.0. Test nainstalované distribuce používá také Pillow 13.0.0. Vstupy jsou syntetické; reálná 1TB kolekce nebyla otestována.
+Zpráva se týká **mbmerge 2.2.0 / schéma 3**, včetně sloučení základní úrovně a následné tvorby nižších zoomů. Místní prostředí: macOS ARM64, Python 3.12.14, SQLite 3.53.1, Pillow 12.3.0, libwebp 1.6.0. Test nainstalované distribuce používá také Pillow 13.0.0. Vstupy jsou syntetické; reálná 1TB kolekce nebyla otestována.
 
 ## Správnost a obnova
 
@@ -23,7 +23,7 @@ Simulace změny zdroje ověřuje reakci evidence, ne všechny možné souběžn�
 
 ## Opakovaný import, prázdné dlaždice a `tile` (reálná data)
 
-`tests/test_reimport.py` a `tests/test_tile.py` přidávají 18 testů; celá sada (48) prochází s Pythonem 3.11.2, SQLite 3.40.1, Pillow 10.4.0 a GDAL 3.11.4 ([TEST_RESULTS.txt](TEST_RESULTS.txt)) i s Pythonem 3.13 / Pillow 13.0.0 bez GDAL (11 testů s GDAL přeskočeno). Pokrývají změněný zdroj odmítnutý ve výchozím stavu a přes `--reimport changed` přeložený stejně jako při čisté přestavbě, opakované `--reimport always`, po kterém zůstane výstup s binární alfou bajtově stejný, zdokumentované hromadění částečné alfy, pořadí podle seznamu, kontrolu přes stat, která zachytí i úpravu s obnoveným mtime, vynechané prázdné dlaždice, SIGKILL během opakovaného importu poloprůhledného zdroje bez dvojího přeložení a v `tile` okraje, nodata barvy, ořez, binární alfu, pořadí vstupů, PDF a přijetí výstupu příkazem merge.
+`tests/test_reimport.py` a `tests/test_tile.py` přidávají 19 testů; celá sada (49) prochází s Pythonem 3.11.2, SQLite 3.40.1, Pillow 10.4.0 a GDAL 3.11.4 ([TEST_RESULTS.txt](TEST_RESULTS.txt)) i s Pythonem 3.13 / Pillow 13.0.0 bez GDAL (12 testů s GDAL přeskočeno). Pokrývají změněný zdroj odmítnutý ve výchozím stavu a přes `--reimport changed` přeložený stejně jako při čisté přestavbě, opakované `--reimport always`, po kterém zůstane výstup s binární alfou bajtově stejný, zdokumentované hromadění částečné alfy, pořadí podle seznamu, kontrolu přes stat, která zachytí i úpravu s obnoveným mtime, vynechané prázdné dlaždice, SIGKILL během opakovaného importu poloprůhledného zdroje bez dvojího přeložení a v `tile` okraje, nodata barvy, ořez, binární alfu, pořadí vstupů, PDF a přijetí výstupu příkazem merge.
 
 Reálné územní plány (115 dokumentů okresu Benešov, základní zoom 17, 512 px):
 
@@ -31,6 +31,7 @@ Reálné územní plány (115 dokumentů okresu Benešov, základní zoom 17, 51
 - `tile` zapisuje základní dlaždice rovnou do MBTiles z pracovních procesů, které čtou warp po obdélnících řádek po řádku, místo dlaždicování přes warpované VRT: největší plán (31 000 × 28 000 px, uložený po řádcích) 126 → 30 s; dvanáct dokumentů 378 → 115 s se čtyřmi dokumenty souběžně. Základní dlaždice pěti sousedních plánů jsou pixelově shodné s předchozí cestou přes pásy; mezery i překryv beze změny. Proti přesnému warpu (`-et 0`) se pixely liší nejvýš o 1; `gdalwarp` rovnou do souboru byl rychlejší, ale u 8 % pixelů se lišil až o 82, proto se nepoužívá.
 - Ortofoto, 12 JPEG listů 20 000 × 16 000 px (world file v S-JTSK, `--s-srs EPSG:5514`), z19 až z0, 14 workerů: cesta přes pásy 780 s, přímý zápis 536 s (6,7 GB), `--quality 85` 184 s (1,0 GB). Viditelné pixely z19 shodné s cestou přes pásy (z 78 milionů se neliší žádný). Paměť ve špičce asi 500 MB na worker.
 - Úrovně pyramidy: přednásobené `reduce(2)` místo BOX zmenšení, jehož zaokrouhlení posouvalo každou úroveň o +0,5. O čtyři úrovně níž klesla průměrná odchylka od přesného průměru 16 × 16 z 2,3–3,0 na 0,8–1,2.
+- Úrovně pyramidy stavěné v pracovních procesech `tile` (2.2.0): bezztrátové výstupy územního plánu (z17–z0) i 12 listů ortofota (z19–z12) pixelově shodné s 2.1.0 na všech zoomech. S `--quality 85` PSNR proti bezztrátové pyramidě z18 37,3 → 38,1 dB, z15 34,5 → 35,5 dB (z19 beze změny 40,1 dB); čas procesoru 1 994–2 014 s → 1 816–1 832 s user, po dvou bězích na vytíženém stroji.
 - `--reimport always` všech pěti dokumentů, dvakrát: výstup bajtově shodný s prvním sloučením (3 457 dlaždic).
 - `--verify-recorded stat` nad 115 evidovanými zdroji: 0,38 s.
 - Opakovaný import tří dokumentů do WebP výstupu s 49 496 dlaždicemi, zatímco MapProxy servírovala tentýž soubor: 12 100 požadavků, 0 chyb, checkpoint nebyl zablokován.
@@ -56,7 +57,7 @@ První pokus ve workspace zastavila změna fingerprintu vstupu před dokončení
 
 ## Distribuce a dokumentace
 
-Wheel/sdist prošly strict Twine a kontrolou identity/obsahu/tagu v2.1.0. Chybný tag se odmítá. Přímý wheel i wheel znovu sestavený ze sdistu prošly izolovaným testem instalovaného CLI mimo checkout: skutečné workery, smíšené 512px vstupy, oba bezztrátové kodéry, celá pyramida, přesné základní pixely, TMS, metadata, replay a dekódování. Místně byly ověřeny EN/CS odkazy a obrázky README.
+Wheel/sdist prošly strict Twine a kontrolou identity/obsahu/tagu v2.2.0. Chybný tag se odmítá. Přímý wheel i wheel znovu sestavený ze sdistu prošly izolovaným testem instalovaného CLI mimo checkout: skutečné workery, smíšené 512px vstupy, oba bezztrátové kodéry, celá pyramida, přesné základní pixely, TMS, metadata, replay a dekódování. Místně byly ověřeny EN/CS odkazy a obrázky README.
 
 Výsledky GitHub-hosted CI jsou v Actions kontrolách větve/PR. Místní výsledky netvrdí dostupnost všech podporovaných runnerů na tomto stroji. Validace nevytváří release tag, GitHub Release ani upload na PyPI/TestPyPI.
 

@@ -95,6 +95,33 @@ class TileTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(all_tiles(merged)[tms(COL, ROW)], tiles[tms(COL, ROW)])  # copied, not re-encoded
 
+    def test_pyramid_built_in_memory_equals_reduction_of_stored_children(self):
+        # 8x8 tiles, one worker: the workers build Z-1 and Z-2 from pixels in memory and Z-3
+        # comes from stored tiles; every level must be the premultiplied 2x2 average of its
+        # stored children, with integer keys, so the split is invisible in lossless output.
+        gx = Image.linear_gradient("L").resize((512, 512))
+        im = Image.merge("RGB", (gx, gx.rotate(90), Image.effect_noise((512, 512), 60)))
+        mask = Image.new("L", (512, 512), 0)
+        ImageDraw.Draw(mask).ellipse((20, 40, 470, 500), fill=255)
+        im.putalpha(mask.resize((128, 128)).resize((512, 512), Image.BILINEAR))  # soft edge: partial alpha
+        out, proc = self.tile(self.geotiff(im), extra=["--min-zoom", Z - 3, "--threads", "1"])
+        self.assertIn('"levels": 2', proc.stderr)  # Z-1 and Z-2 really come from the workers
+        with sqlite3.connect(out) as db:
+            kinds = set(db.execute("SELECT DISTINCT typeof(tile_column), typeof(tile_row) FROM tiles"))
+        self.assertEqual(kinds, {("integer", "integer")})
+        tiles = all_tiles(out)
+        for z in (Z - 1, Z - 2, Z - 3):
+            children = {k for k in tiles if k[0] == z + 1}
+            self.assertEqual({k for k in tiles if k[0] == z}, {(z, x // 2, y // 2) for _, x, y in children})
+            for _, x, y in [k for k in tiles if k[0] == z]:
+                canvas = Image.new("RGBA", (2 * TS, 2 * TS))
+                for dx, dy in ((0, 0), (1, 0), (0, 1), (1, 1)):
+                    child = tiles.get((z + 1, 2 * x + dx, 2 * y + dy))
+                    if child is not None:
+                        canvas.paste(rgba(child), (dx * TS, (1 - dy) * TS))
+                expected = canvas.convert("RGBa").reduce(2).convert("RGBA")
+                self.assertEqual(rgba(tiles[(z, x, y)]).tobytes(), expected.tobytes(), (z, x, y))
+
     def test_quality_writes_lossy_webp_at_every_level(self):
         im = Image.new("RGB", (256, 256), (40, 120, 200))
         out, _ = self.tile(self.geotiff(im), extra=["--min-zoom", Z - 2, "--quality", "85"])

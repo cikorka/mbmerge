@@ -2,7 +2,12 @@
 
 **English** | [Čeština](CHANGELOG.cs.md)
 
-## 2.1.0 — unreleased
+## 2.2.0 — unreleased
+
+- `tile` builds the first four levels below the base (`PYRAMID_DEPTH`) in the worker processes, from the pixels they have just encoded, instead of decoding stored tiles: work rectangles are aligned to blocks of 16 × 16 tiles and one pending row per level is kept (about 30 MB per worker). Lossless outputs are pixel-identical to 2.1.0 at every zoom. With `--quality 85`, z18–z15 are about 1 dB closer to the lossless pyramid (no repeated lossy round trip), and an orthophoto of 12 sheets took about 9 % less CPU time. Small rasters with fewer rectangles than workers use a shallower depth, so they keep using every worker.
+- Overview tile keys are stored as integers (a numpy integer would have been stored as a BLOB).
+
+## 2.1.0 — 2026-11-02
 
 ### Changed
 
