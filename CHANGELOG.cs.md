@@ -2,7 +2,12 @@
 
 [English](CHANGELOG.md) | **Čeština**
 
-## 2.1.0 — nevydáno
+## 2.2.0 — nevydáno
+
+- `tile` staví první čtyři úrovně pod základem (`PYRAMID_DEPTH`) přímo v pracovních procesech, z pixelů, které právě zakódovaly, místo dekódování uložených dlaždic: pracovní obdélníky jsou zarovnané na bloky 16 × 16 dlaždic a pro každou úroveň se drží jedna rozpracovaná řada (asi 30 MB na proces). Bezztrátové výstupy jsou pixelově shodné s 2.1.0 na všech zoomech. S `--quality 85` jsou z18–z15 asi o 1 dB blíž bezztrátové pyramidě (bez opakované ztrátové komprese) a ortofoto z 12 listů spotřebovalo asi o 9 % méně času procesoru. Malé rastry s méně obdélníky, než je procesů, použijí menší hloubku, aby dál pracovaly všechny procesy.
+- Klíče dlaždic přehledů se ukládají jako celá čísla (celé číslo z numpy by se uložilo jako BLOB).
+
+## 2.1.0 — 2026-11-02
 
 ### Změny
 

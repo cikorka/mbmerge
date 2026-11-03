@@ -2,7 +2,7 @@
 
 **English** | [Čeština](TEST_REPORT.cs.md)
 
-This report covers **mbmerge 2.1.0 / schema 3**, including base-level merge followed by bottom-up overview generation. Local host: macOS ARM64, Python 3.12.14, SQLite 3.53.1, Pillow 12.3.0, libwebp 1.6.0. Installed-distribution smoke checks also use Pillow 13.0.0. All inputs are synthetic. A real 1 TB collection has not been tested.
+This report covers **mbmerge 2.2.0 / schema 3**, including base-level merge followed by bottom-up overview generation. Local host: macOS ARM64, Python 3.12.14, SQLite 3.53.1, Pillow 12.3.0, libwebp 1.6.0. Installed-distribution smoke checks also use Pillow 13.0.0. All inputs are synthetic. A real 1 TB collection has not been tested.
 
 ## Automated correctness and recovery
 
@@ -23,7 +23,7 @@ Source-mutation fault injection tests the ledger response; it does not simulate 
 
 ## Reimport, empty tiles and `tile` (real data)
 
-`tests/test_reimport.py` and `tests/test_tile.py` add 18 tests; the full suite (48) passes with Python 3.11.2, SQLite 3.40.1, Pillow 10.4.0 and GDAL 3.11.4 ([TEST_RESULTS.txt](TEST_RESULTS.txt)) and with Python 3.13 / Pillow 13.0.0 without GDAL (11 GDAL tests skipped). They cover a changed source refused by default and overlaid by `--reimport changed` exactly like a fresh build, repeated `--reimport always` leaving binary-alpha outputs byte-identical, the documented partial-alpha accumulation, listed priority, stat verification that still catches an edit with restored mtime, skipped empty tiles, SIGKILL during a reimport of a translucent source resuming without a second overlay, and `tile` collars, nodata colors, cutlines, binary alpha, input order, PDF input and merge acceptance.
+`tests/test_reimport.py` and `tests/test_tile.py` add 19 tests; the full suite (49) passes with Python 3.11.2, SQLite 3.40.1, Pillow 10.4.0 and GDAL 3.11.4 ([TEST_RESULTS.txt](TEST_RESULTS.txt)) and with Python 3.13 / Pillow 13.0.0 without GDAL (12 GDAL tests skipped). They cover a changed source refused by default and overlaid by `--reimport changed` exactly like a fresh build, repeated `--reimport always` leaving binary-alpha outputs byte-identical, the documented partial-alpha accumulation, listed priority, stat verification that still catches an edit with restored mtime, skipped empty tiles, SIGKILL during a reimport of a translucent source resuming without a second overlay, and `tile` collars, nodata colors, cutlines, binary alpha, input order, PDF input and merge acceptance.
 
 Real municipal land-use plans (115 documents, Benešov district, base zoom 17, 512 px):
 
@@ -31,6 +31,7 @@ Real municipal land-use plans (115 documents, Benešov district, base zoom 17, 5
 - `tile` writes base tiles straight into the MBTiles from worker processes that read the warp in rectangles row by row, instead of tiling through warped VRTs: the largest plan (31,000 × 28,000 px, stored one row per strip) 126 → 30 s; twelve documents 378 → 115 s with four documents at once. Base tiles of five neighbouring plans are pixel-identical to the previous stripe pipeline; cracks and overlap unchanged. Against an exact warp (`-et 0`) the pixels stay within 1; `gdalwarp` writing straight to a file was faster but off by up to 82 in 8 % of pixels, so it is not used.
 - Orthophoto, 12 JPEG sheets 20,000 × 16,000 px (S-JTSK world files, `--s-srs EPSG:5514`), z19 down to z0, 14 workers: stripe pipeline 780 s, direct writer 536 s (6.7 GB), `--quality 85` 184 s (1.0 GB). z19 visible pixels identical to the stripe pipeline (0 of 78 million differ). Peak memory about 500 MB per worker.
 - Pyramid levels: premultiplied `reduce(2)` instead of a BOX resize, whose rounding biased each level by +0.5. Four levels down, the mean deviation from an exact 16 × 16 average fell from 2.3–3.0 to 0.8–1.2.
+- Pyramid levels built in the tile workers (2.2.0): lossless outputs of a land-use plan (z17–z0) and of 12 orthophoto sheets (z19–z12) pixel-identical to 2.1.0 at every zoom. With `--quality 85`, PSNR against the lossless pyramid z18 37.3 → 38.1 dB, z15 34.5 → 35.5 dB (z19 unchanged at 40.1 dB); CPU time 1,994–2,014 s → 1,816–1,832 s user, two runs each on a loaded host.
 - `--reimport always` of all five documents, twice: output byte-identical to the first merge (3,457 tiles).
 - `--verify-recorded stat` over 115 recorded sources: 0.38 s.
 - Reimport of three documents into a 49,496-tile WebP output while MapProxy served the same file: 12,100 requests, 0 failures, no blocked checkpoint.
@@ -56,7 +57,7 @@ An early workspace-based attempt stopped when an input fingerprint changed befor
 
 ## Distribution and documentation checks
 
-Wheel and sdist passed strict Twine metadata validation and `check_release.py` identity/content/tag checks for v2.1.0. A wrong version tag is refused. Installation of the wheel and a wheel rebuilt from sdist passed the isolated installed-CLI test outside the checkout, using real workers, mixed 512px sources, both lossless encoders, a complete pyramid, exact base pixels, TMS checks, metadata, replay and full output decoding. English/Czech links and illustrated README assets were checked locally.
+Wheel and sdist passed strict Twine metadata validation and `check_release.py` identity/content/tag checks for v2.2.0. A wrong version tag is refused. Installation of the wheel and a wheel rebuilt from sdist passed the isolated installed-CLI test outside the checkout, using real workers, mixed 512px sources, both lossless encoders, a complete pyramid, exact base pixels, TMS checks, metadata, replay and full output decoding. English/Czech links and illustrated README assets were checked locally.
 
 GitHub-hosted CI results are available through the branch/PR Actions checks. The recorded local results above do not claim every supported runner was locally available. No release tag, GitHub Release, PyPI or TestPyPI upload is performed by these validation commands.
 

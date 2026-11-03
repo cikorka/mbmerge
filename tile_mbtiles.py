@@ -17,8 +17,10 @@ which must belong to the same libgdal):
    grid, drop fully transparent tiles, apply --binary-alpha and encode
    (lossless, or lossy WebP with --quality for imagery that is not merged).
    The parent is the only SQLite writer; nothing is staged on disk.
-5. levels down to --min-zoom from the written base: 2x2 average with
-   premultiplied alpha, the same method `merge` uses for its pyramid.
+5. levels down to --min-zoom: 2x2 average with premultiplied alpha, the same
+   method `merge` uses for its pyramid. The workers build the first
+   PYRAMID_DEPTH levels from the pixels they have just encoded (never from
+   decoded lossy tiles); lower levels come from the stored tiles above.
 
 Only fully transparent tiles count as empty. Colors are never interpreted while
 tiling: turning black/white collars into transparency is step 1's job, before
@@ -58,6 +60,10 @@ RESAMPLING = ("auto", "nearest", "bilinear", "cubic", "lanczos", "average")
 READ_COLUMNS_MAX = 64  # 64 x 512 px RGBA = 64 MiB per request
 READ_COLUMNS_WIDE = 16
 JOBS_PER_WORKER = 4  # several rectangles per worker balance areas outside a cutline
+MIN_JOBS_PER_WORKER = 2  # below this the in-memory pyramid depth is lowered (see write_base)
+# Levels below the base built by the tile workers from pixels in memory (one
+# pending row per level); lower ones from the stored tiles of the level above.
+PYRAMID_DEPTH = 4
 WORKER_CACHE_MIB = 256  # GDAL block cache per worker
 QUALITY_RANGE = range(1, 101)
 OVERVIEW_INFLIGHT = 8  # overview jobs per worker submitted ahead of the writer
@@ -269,7 +275,14 @@ def encoding(args):
 
 
 def tile_rows_worker(jobs, results, cfg):
-    """Worker process: rectangles (c0, c1, r0, r1) from `jobs` -> encoded TMS tiles on `results`."""
+    """Worker process: rectangles (c0, c1, r0, r1) from `jobs` -> encoded TMS tiles on `results`.
+
+    Rectangles are aligned to blocks of 2**depth tiles, so every parent down to
+    `depth` levels has all its descendants in one rectangle. Pairs of tile rows
+    are reduced to the next level as soon as both are read, from the pixels
+    that were just encoded, never from decoded (possibly lossy) tiles; only one
+    pending row per level is held.
+    """
     try:
         import signal
 
@@ -287,65 +300,115 @@ def tile_rows_worker(jobs, results, cfg):
         mem = gdal.GetDriverByName("MEM")
         ts, res, (ox, oy) = cfg["tile_size"], cfg["res"], cfg["origin"]
         px0, py0, width, height = cfg["px0"], cfg["py0"], cfg["width"], cfg["height"]
-        top_row = 2 ** cfg["zoom"] - 1
-        threshold = cfg["binary_alpha"]
+        zoom, depth, threshold = cfg["zoom"], cfg["depth"], cfg["binary_alpha"]
 
         def encode(pixels):
             return encode_tile(Image.fromarray(np.ascontiguousarray(pixels), "RGBA"), cfg)
 
+        def read_row(ty, c0, c1):
+            """One row of base tiles as RGBA; zeros outside the warp."""
+            canvas = np.zeros((ts, (c1 - c0) * ts, 4), np.uint8)
+            x, y = c0 * ts - px0, ty * ts - py0
+            rx0, rx1 = max(0, x), min(width, c1 * ts - px0)
+            ry0, ry1 = max(0, y), min(height, y + ts)
+            if rx1 <= rx0 or ry1 <= ry0:
+                return canvas
+            view = canvas[ry0 - y:ry1 - y, rx0 - x:rx1 - x]
+            data = ds.ReadAsArray(rx0, ry0, rx1 - rx0, ry1 - ry0)
+            if bands == 2:  # gray + alpha
+                view[..., :3] = data[0][..., None]
+                view[..., 3] = data[1]
+            else:
+                view[...] = data.transpose(1, 2, 0)
+            if layer is not None:
+                mask = mem.Create("", rx1 - rx0, ry1 - ry0, 1, gdal.GDT_Byte)
+                mask.SetGeoTransform((ox + rx0 * res, res, 0, oy - ry0 * res, 0, -res))
+                gdal.RasterizeLayer(mask, [1], layer, burn_values=[255])  # pixel-centre rule
+                np.minimum(view[..., 3], mask.ReadAsArray(), out=view[..., 3])
+            return canvas
+
+        def base_tiles(canvas, ty, c0, tiles, stats):
+            """Encode the base row; return which tiles were stored (binary alpha applied in place)."""
+            stored = np.zeros(canvas.shape[1] // ts, bool)
+            for i in range(len(stored)):
+                pixels = canvas[:, i * ts:(i + 1) * ts]
+                alpha = pixels[..., 3]
+                if not alpha.any():
+                    if not cfg["keep_empty"] or not cfg["inside"](ty, c0 + i):
+                        stats["empty_skipped"] += cfg["inside"](ty, c0 + i)
+                        continue
+                elif threshold and ((alpha > 0) & (alpha < 255)).any():
+                    alpha[...] = np.where(alpha >= threshold, 255, 0)
+                    stats["binary_alpha_tiles"] += 1
+                    if not alpha.any() and not cfg["keep_empty"]:
+                        stats["empty_skipped"] += 1
+                        continue
+                tiles.append((zoom, c0 + i, 2 ** zoom - 1 - ty, encode(pixels)))
+                stored[i] = True
+            return stored
+
+        def reduce_rows(top, bottom):
+            """Two rows of tiles -> one row at the next level: premultiplied exact 2x2 average."""
+            with Image.fromarray(np.concatenate([top, bottom]), "RGBA") as im:
+                with im.convert("RGBa") as premultiplied, premultiplied.reduce(2) as reduced:
+                    with reduced.convert("RGBA") as result:
+                        return np.asarray(result).copy()
+
         while (job := jobs.get()) is not None:
             c0, c1, r0, r1 = job
-            x = c0 * ts - px0
-            rx0, rx1 = max(0, x), min(width, c1 * ts - px0)
+            pending = [None] * (depth + 1)  # per level: (pixels, stored) of an upper row awaiting its pair
             for ty in range(r0, r1):
-                y = ty * ts - py0
-                ry0, ry1 = max(0, y), min(height, y + ts)
-                tiles, stats = [], {"empty_skipped": 0, "binary_alpha_tiles": 0}
-                canvas = np.zeros((ts, (c1 - c0) * ts, 4), np.uint8)
-                view = canvas[ry0 - y:ry1 - y, rx0 - x:rx1 - x]
-                data = ds.ReadAsArray(rx0, ry0, rx1 - rx0, ry1 - ry0)
-                if bands == 2:  # gray + alpha
-                    view[..., :3] = data[0][..., None]
-                    view[..., 3] = data[1]
-                else:
-                    view[...] = data.transpose(1, 2, 0)
-                del data
-                if layer is not None:
-                    mask = mem.Create("", rx1 - rx0, ry1 - ry0, 1, gdal.GDT_Byte)
-                    mask.SetGeoTransform((ox + rx0 * res, res, 0, oy - ry0 * res, 0, -res))
-                    gdal.RasterizeLayer(mask, [1], layer, burn_values=[255])  # pixel-centre rule
-                    np.minimum(view[..., 3], mask.ReadAsArray(), out=view[..., 3])
-                for i in range(c1 - c0):
-                    pixels = canvas[:, i * ts:(i + 1) * ts]
-                    alpha = pixels[..., 3]
-                    if not alpha.any():
-                        if not cfg["keep_empty"]:
-                            stats["empty_skipped"] += 1
-                            continue
-                    elif threshold and ((alpha > 0) & (alpha < 255)).any():
-                        alpha[...] = np.where(alpha >= threshold, 255, 0)
-                        stats["binary_alpha_tiles"] += 1
-                        if not alpha.any() and not cfg["keep_empty"]:
-                            stats["empty_skipped"] += 1
-                            continue
-                    tiles.append((cfg["zoom"], c0 + i, top_row - ty, encode(pixels)))
+                tiles, stats = [], {"empty_skipped": 0, "binary_alpha_tiles": 0, "overview_tiles": 0}
+                canvas = read_row(ty, c0, c1)
+                row = (canvas, base_tiles(canvas, ty, c0, tiles, stats))
+                level, row_index, col0 = 0, ty, c0
+                while level < depth:
+                    if pending[level] is None:
+                        pending[level] = row
+                        break
+                    (top, top_stored), (bottom, bottom_stored) = pending[level], row
+                    pending[level] = None
+                    level, row_index, col0 = level + 1, row_index // 2, col0 // 2
+                    stored = (top_stored | bottom_stored).reshape(-1, 2).any(axis=1)
+                    pixels = reduce_rows(top, bottom)
+                    z = zoom - level
+                    for i in np.flatnonzero(stored).tolist():  # Python ints: numpy ints are stored as BLOBs
+                        tiles.append((z, col0 + i, 2 ** z - 1 - row_index, encode(pixels[:, i * ts:(i + 1) * ts])))
+                    stats["overview_tiles"] += int(stored.sum())
+                    row = (pixels, stored)
                 results.put(("tiles", tiles, stats))
         results.put(("done", None, None))
     except BaseException:
         results.put(("error", traceback.format_exc(), None))
 
 
-def write_base(db, vrt, cut, layout, args):
-    """Run the tile workers and insert their tiles; the only writer is this process."""
+def plan_rectangles(layout, threads, depth):
+    """Rectangles (c0, c1, r0, r1) aligned to blocks of 2**depth tiles; return (rectangles, rows of work)."""
+    block = 2 ** depth
+    tx0, ty0 = layout["tx0"] // block * block, layout["ty0"] // block * block
+    tx1, ty1 = (layout["tx1"] // block + 1) * block, (layout["ty1"] // block + 1) * block  # exclusive
+    columns, rows = tx1 - tx0, ty1 - ty0
+    band = columns if columns <= READ_COLUMNS_MAX else max(READ_COLUMNS_WIDE, block)
+    bands = [(c, min(c + band, tx1)) for c in range(tx0, tx1, band)]
+    step = max(1, math.ceil(rows * len(bands) / (threads * JOBS_PER_WORKER) / block)) * block
+    rectangles = [(c0, c1, r, min(r + step, ty1)) for c0, c1 in bands for r in range(ty0, ty1, step)]
+    return rectangles, rows * len(bands)
+
+
+def write_base(db, vrt, cut, layout, args, max_depth):
+    """Base tiles and up to `max_depth` levels below them from worker processes; return (stats, depth).
+
+    Alignment to blocks of 2**depth tiles can leave a small raster (one plan)
+    with fewer rectangles than workers; the depth is then lowered until every
+    worker has at least MIN_JOBS_PER_WORKER rectangles, so pixels and speed
+    do not depend on it. This process is the only SQLite writer.
+    """
     if layout["width"] <= 0 or layout["height"] <= 0:
         raise TileError("Warped raster is empty")
-    rows = layout["ty1"] - layout["ty0"] + 1
-    columns = layout["tx1"] - layout["tx0"] + 1
-    band = columns if columns <= READ_COLUMNS_MAX else READ_COLUMNS_WIDE
-    bands = [(c, min(c + band, layout["tx1"] + 1)) for c in range(layout["tx0"], layout["tx1"] + 1, band)]
-    step = max(1, math.ceil(rows * len(bands) / (args.threads * JOBS_PER_WORKER)))
-    rectangles = [(c0, c1, r, min(r + step, layout["ty1"] + 1))
-                  for c0, c1 in bands for r in range(layout["ty0"], layout["ty1"] + 1, step)]
+    for depth in range(max_depth, -1, -1):
+        rectangles, total = plan_rectangles(layout, args.threads, depth)
+        if len(rectangles) >= args.threads * MIN_JOBS_PER_WORKER:
+            break
     workers = min(args.threads, len(rectangles))
     ctx = multiprocessing.get_context("spawn")
     jobs, results = ctx.Queue(), ctx.Queue(maxsize=2 * workers)  # bounded: a slow writer slows the workers
@@ -353,11 +416,12 @@ def write_base(db, vrt, cut, layout, args):
         jobs.put(rectangle)
     for _ in range(workers):
         jobs.put(None)
-    cfg = {**layout, **encoding(args), "vrt": str(vrt), "cut": str(cut) if cut else None,
-           "binary_alpha": args.binary_alpha, "keep_empty": args.keep_empty}
+    cfg = {**layout, **encoding(args), "vrt": str(vrt), "cut": str(cut) if cut else None, "depth": depth,
+           "binary_alpha": args.binary_alpha, "keep_empty": args.keep_empty,
+           "inside": TileRange(layout)}
     procs = [ctx.Process(target=tile_rows_worker, args=(jobs, results, cfg), daemon=True) for _ in range(workers)]
-    stats = {"tiles": 0, "empty_skipped": 0, "binary_alpha_tiles": 0}
-    total, done_rows, start, last_log = rows * len(bands), 0, time.monotonic(), time.monotonic()
+    stats = {"tiles": 0, "empty_skipped": 0, "binary_alpha_tiles": 0, "overview_tiles": 0}
+    done_rows, start, last_log = 0, time.monotonic(), time.monotonic()
     for p in procs:
         p.start()
     try:
@@ -377,7 +441,7 @@ def write_base(db, vrt, cut, layout, args):
                 continue
             db.executemany("INSERT INTO tiles VALUES(?,?,?,?)", payload)
             db.commit()
-            stats["tiles"] += len(payload)
+            stats["tiles"] += len(payload) - counts["overview_tiles"]
             for key, value in counts.items():
                 stats[key] += value
             done_rows += 1
@@ -391,8 +455,24 @@ def write_base(db, vrt, cut, layout, args):
             if p.is_alive():
                 p.terminate()
             p.join()
-    log(args, "base", zoom=layout["zoom"], workers=workers, seconds=round(time.monotonic() - start, 1), **stats)
-    return stats
+    log(args, "base", zoom=layout["zoom"], levels=depth, workers=workers,
+        seconds=round(time.monotonic() - start, 1), **stats)
+    return stats, depth
+
+
+class TileRange:
+    """Picklable test: is XYZ tile (row, column) inside the warp's own tile range?
+
+    Rectangles are padded to the block grid; padding tiles are neither counted
+    as skipped nor stored by --keep-empty.
+    """
+
+    def __init__(self, layout):
+        self.bounds = (layout["tx0"], layout["tx1"], layout["ty0"], layout["ty1"])
+
+    def __call__(self, ty, tx):
+        tx0, tx1, ty0, ty1 = self.bounds
+        return tx0 <= tx <= tx1 and ty0 <= ty <= ty1
 
 
 def children_of(db, z, x, y):
@@ -461,10 +541,11 @@ def write_mbtiles(output, vrt, cut, zoom, min_zoom, args, settings):
             CREATE TABLE tiles(zoom_level INTEGER NOT NULL, tile_column INTEGER NOT NULL,
               tile_row INTEGER NOT NULL, tile_data BLOB NOT NULL);
             CREATE UNIQUE INDEX tile_index ON tiles(zoom_level, tile_column, tile_row);""")
-        stats = write_base(db, vrt, cut, layout, args)
+        stats, depth = write_base(db, vrt, cut, layout, args, min(PYRAMID_DEPTH, zoom - min_zoom))
         if not stats["tiles"]:
             raise TileError("No nonempty tiles: the input is fully transparent after nodata/cutline handling")
-        stats["overview_tiles"] = write_overviews(db, zoom, min_zoom, args) if min_zoom < zoom else 0
+        if min_zoom < zoom - depth:
+            stats["overview_tiles"] += write_overviews(db, zoom - depth, min_zoom, args)
         meta = {"name": args.name or output.stem, "format": args.format, "type": "overlay", "version": "1.3",
                 "scheme": "tms", "minzoom": str(min_zoom), "maxzoom": str(zoom),
                 "mbmerge:tile": json.dumps(settings, ensure_ascii=False),
