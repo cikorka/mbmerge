@@ -2,6 +2,11 @@
 
 [English](CHANGELOG.md) | **Čeština**
 
+## 2.4.0 — nevydáno
+
+- `tile --resume`: postup (`rows_done` v událostech `tiling` a v závěrečné `base`, která nově nese `rows_done`/`rows`) započítá řádky hotové před přerušením, takže ukazuje postup celého výstupu, ne jen aktuálního běhu.
+- `mbmerge grade` změří jednu barevnou úpravu (úrovně po kanálech, gamma, sytost, vibrance) pro celou mozaiku ze všech vstupů čtených v 1/8 (99 listů ortofota: 13 s na 12 vláknech); `--preview` vyrobí výřezy před/po. `tile --grade` ji použije na každý pixel před kódováním — jedna funkce všude, takže bez švů mezi listy — a zapíše ji do metadat i kontraktu navázání; `compare --grade` upraví i referenci. Upravené ortofoto při q85: dlaždice asi o 45 % větší.
+
 ## 2.3.1 — 2026-11-06
 
 - `tile --cutline`: řady dlaždic, kterých se polygon nedotýká, se už ze zdrojů nečtou (dekódovaly se, převzorkovaly a pak ořízly do průhledna). Obálka hranice republiky leží zhruba z poloviny mimo ni, takže celostátní běh trávil hodiny na řadách bez jediné dlaždice. Výstup je bajtově shodný; přerušený běh 2.3.0 lze navázat přes `--resume`.

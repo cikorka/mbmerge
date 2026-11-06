@@ -376,6 +376,11 @@ def tile_rows_worker(jobs, results, cfg):
         ts, res, (ox, oy) = cfg["tile_size"], cfg["res"], cfg["origin"]
         px0, py0, width, height = cfg["px0"], cfg["py0"], cfg["width"], cfg["height"]
         zoom, depth, threshold = cfg["zoom"], cfg["depth"], cfg["binary_alpha"]
+        grader = None
+        if cfg["grade"] is not None:
+            from grade_mbtiles import Grader
+
+            grader = Grader(cfg["grade"])
 
         lossy = cfg["quality"] is not None
 
@@ -409,6 +414,8 @@ def tile_rows_worker(jobs, results, cfg):
                 view[..., 3] = data[1]
             else:
                 view[...] = data.transpose(1, 2, 0)
+            if grader is not None:  # before binary alpha and encoding: every level inherits it, no extra round trip
+                grader(view)
             if layer is not None:
                 mask = mem.Create("", rx1 - rx0, ry1 - ry0, 1, gdal.GDT_Byte)
                 mask.SetGeoTransform((ox + rx0 * res, res, 0, oy - ry0 * res, 0, -res))
@@ -532,9 +539,11 @@ def write_base(db, vrt, cut, layout, args, plan, done):
         jobs.put(None)
     cfg = {**layout, **encoding(args), "vrt": str(vrt), "cut": str(cut) if cut else None, "depth": depth,
            "binary_alpha": args.binary_alpha, "keep_empty": args.keep_empty,
-           "inside": TileRange(layout), "worker_cache_mib": args.worker_cache_mib}
+           "inside": TileRange(layout), "worker_cache_mib": args.worker_cache_mib, "grade": args.grade_values}
     procs = [ctx.Process(target=tile_rows_worker, args=(jobs, results, cfg), daemon=True) for _ in range(workers)]
-    done_rows, start, last_log = 0, time.monotonic(), time.monotonic()
+    # rows of rectangles finished before a resume count too: rows_done/rows is the progress of the whole output
+    done_rows = sum(r1 - r0 for _, _, r0, r1 in done)
+    start, last_log = time.monotonic(), time.monotonic()
     for p in procs:
         p.start()
     try:
@@ -574,7 +583,7 @@ def write_base(db, vrt, cut, layout, args, plan, done):
             if p.is_alive():
                 p.terminate()
             p.join()
-    log(args, "base", zoom=layout["zoom"], levels=depth, workers=workers,
+    log(args, "base", zoom=layout["zoom"], levels=depth, workers=workers, rows_done=done_rows, rows=total,
         seconds=round(time.monotonic() - start, 1), **stats)
     return stats
 
@@ -771,6 +780,14 @@ def write_mbtiles(output, vrt, cut, zoom, min_zoom, args, settings, inputs=()):
 
 def tile(args):
     """`mbmerge tile`: inputs -> flat MBTiles for `mbmerge merge`."""
+    args.grade_values = None
+    if args.grade:
+        from grade_mbtiles import GradeError, contract, load
+
+        try:  # only the parameters that decide pixels: they enter the resume contract and the metadata
+            args.grade_values = contract(load(args.grade))
+        except (OSError, ValueError, KeyError, GradeError) as exc:
+            raise TileError(f"--grade {args.grade}: {exc}") from exc
     if args.quality is not None and args.format != "webp":
         raise TileError("--quality selects lossy WebP; it cannot be combined with --format png")
     version = gdal_version()
@@ -809,7 +826,7 @@ def tile(args):
                     "nodata": [list(c) for c in args.nodata],
                     "collar": [list(c) for c in args.collar], "near": args.near if args.collar else None,
                     "binary_alpha": args.binary_alpha, "cutline": bool(args.cutline), "cwhere": args.cwhere,
-                    "inputs": len(files)}
+                    "inputs": len(files), "grade": args.grade_values}
         # path, size and mtime of every input: resuming over changed sources would mix two versions
         inputs = [[str(f), f.stat().st_size, f.stat().st_mtime_ns] for f in map(Path, files)]
         stats = write_mbtiles(output, warped, cut, zoom, min_zoom, args, settings, inputs)
@@ -856,6 +873,8 @@ def add_parser(sub, positive):
     t.add_argument("--page-size", type=int, choices=(1024, 2048, 4096, 8192, 16384, 32768, 65536), default=4096)
     t.add_argument("--threads", type=positive, default=min(8, os.cpu_count() or 1),
                    help="worker processes (each reads and encodes its own rows of tiles)")
+    t.add_argument("--grade", metavar="GRADE_JSON",
+                   help="colour grade from `mbmerge grade`, applied to every pixel before encoding")
     t.add_argument("--worker-cache-mib", type=positive, default=WORKER_CACHE_MIB,
                    help=f"GDAL block cache of each worker in MiB (default {WORKER_CACHE_MIB})")
     t.add_argument("--work-dir", help="directory for temporary files: rasterized PDFs, collar masks, VRTs "

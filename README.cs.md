@@ -125,6 +125,8 @@ Výsledkem je ploché TMS MBTiles (výchozí bezztrátové WebP, nebo `--format 
 
 **Navázání.** Výstup vzniká v `<výstup>.tmp`, commituje se po každé řadě dlaždic a při chybě či zabití procesu zůstává. `--resume` v něm pokračuje včetně hotových pracovních obdélníků a úrovní pyramidy, pokud jsou vstupy (cesta, velikost, mtime) i všechna nastavení stejné; jinak odmítne. `--threads` se smí lišit. Výsledek je bajtově shodný s nepřerušeným během.
 
+**Barevná úprava.** `mbmerge grade` změří jednu úpravu pro celou mozaiku a zapíše ji jako JSON; `tile --grade SOUBOR` ji použije na každý pixel před kódováním, takže ji zdědí všechny úrovně a nic se nekóduje dvakrát. Je to jedna funkce pro všechny pixely — úrovně po kanálech (černý a bílý bod z percentilů histogramu všech vstupů čtených v 1/8, `--clip`), gamma (`--gamma auto` posune medián jasu na `--target-median`), sytost a vibrance (víc pro mdlé barvy než pro syté) — takže mezi vstupy šev vytvořit nemůže. `mbmerge grade --preview SOUBOR --at LON,LAT … --out ADR` vyrobí výřezy před/po pro ladění, `compare --grade` upraví stejně i referenci. Roztažený obraz nese víc detailu i šumu: při stejné `--quality` čekej větší dlaždice. Úprava je součástí kontraktu navázání.
+
 Dva sousední zdroje oříznuté stejnou hranicí do stejné mřížky dostanou doplňkové pixely, takže na té hranici nevznikne šev ani překryv.
 
 ## Omezená paměť a jediný writer

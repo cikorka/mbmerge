@@ -1331,6 +1331,8 @@ def parser():
     add_tile_parser(sub, positive)
     from compare_mbtiles import add_parser as add_compare_parser
     add_compare_parser(sub)
+    from grade_mbtiles import add_parser as add_grade_parser
+    add_grade_parser(sub)
     return p
 
 
