@@ -19,8 +19,9 @@ which must belong to the same libgdal):
    The parent is the only SQLite writer; nothing is staged on disk.
 5. levels down to --min-zoom: 2x2 average with premultiplied alpha, the same
    method `merge` uses for its pyramid. The workers build the first
-   PYRAMID_DEPTH levels from the pixels they have just encoded (never from
-   decoded lossy tiles); lower levels come from the stored tiles above.
+   PYRAMID_DEPTH levels from the pixels they have just encoded; lower levels
+   come from the stored tiles above. With --quality those are lossless copies
+   kept until the end, so no level is ever averaged from decoded lossy tiles.
 
 Only fully transparent tiles count as empty. Colors are never interpreted while
 tiling: turning black/white collars into transparency is step 1's job, before
@@ -201,6 +202,22 @@ def cutline_extent(work, args):
     return cut, tuple(float(v) for v in match.groups())
 
 
+def source_extent(src, work, args):
+    """Extent of the source in EPSG:3857, from an unaligned warp VRT (gdalwarp transforms the edges densely)."""
+    probe = work / "extent.vrt"
+    run(["gdalwarp", "-q", "-overwrite", "-of", "VRT", "-t_srs", "EPSG:3857", src, probe], args)
+    meta = info(probe, args)
+    gt, (width, height) = meta["geoTransform"], meta["size"]
+    return gt[0], gt[3] + gt[5] * height, gt[0] + gt[1] * width, gt[3]
+
+
+def intersect(a, b):
+    minx, miny, maxx, maxy = max(a[0], b[0]), max(a[1], b[1]), min(a[2], b[2]), min(a[3], b[3])
+    if minx >= maxx or miny >= maxy:
+        raise TileError("The cutline does not overlap the input")
+    return minx, miny, maxx, maxy
+
+
 def warp(src, work, zoom, resampling, args):
     """Warp VRT in the tile grid of `zoom`; return (vrt, cutline layer or None).
 
@@ -218,7 +235,10 @@ def warp(src, work, zoom, resampling, args):
            "-dstalpha", "-r", resampling]
     cut = None
     if args.cutline:
-        cut, (minx, miny, maxx, maxy) = cutline_extent(work, args)
+        cut, extent = cutline_extent(work, args)
+        # only where the source has pixels: a country-wide cutline over one sheet
+        # would otherwise make the workers walk the empty rows of the whole country
+        minx, miny, maxx, maxy = intersect(extent, source_extent(src, work, args))
         # snap outward to the tile grid; equivalent to -tap, limited to the polygon
         cmd += ["-te", *(repr(v) for v in (math.floor(minx / res) * res, math.floor(miny / res) * res,
                                            math.ceil(maxx / res) * res, math.ceil(maxy / res) * res))]
@@ -240,6 +260,9 @@ def tile_layout(meta, zoom, tile_size):
             "px0": px0, "py0": py0, "width": width, "height": height,
             "tx0": px0 // tile_size, "tx1": (px0 + width - 1) // tile_size,
             "ty0": py0 // tile_size, "ty1": (py0 + height - 1) // tile_size}
+
+
+LOSSLESS_SOURCE = {"format": "webp", "quality": None, "webp_method": 0, "png_compress_level": 1}
 
 
 def encode_tile(im, enc):
@@ -265,7 +288,8 @@ def overview_tile(job, tile_size, enc):
                     canvas.paste(child.convert("RGBA"), (dx * tile_size, (1 - dy) * tile_size))
         with canvas.convert("RGBa") as premultiplied, premultiplied.reduce(2) as reduced:
             with reduced.convert("RGBA") as result:
-                return z, x, y, encode_tile(result, enc)
+                source = encode_tile(result, LOSSLESS_SOURCE) if enc["quality"] is not None else None
+                return z, x, y, encode_tile(result, enc), source
 
 
 def encoding(args):
@@ -302,8 +326,10 @@ def tile_rows_worker(jobs, results, cfg):
         px0, py0, width, height = cfg["px0"], cfg["py0"], cfg["width"], cfg["height"]
         zoom, depth, threshold = cfg["zoom"], cfg["depth"], cfg["binary_alpha"]
 
-        def encode(pixels):
-            return encode_tile(Image.fromarray(np.ascontiguousarray(pixels), "RGBA"), cfg)
+        lossy = cfg["quality"] is not None
+
+        def encode(pixels, enc=cfg):
+            return encode_tile(Image.fromarray(np.ascontiguousarray(pixels), "RGBA"), enc)
 
         def read_row(ty, c0, c1):
             """One row of base tiles as RGBA; zeros outside the warp."""
@@ -358,10 +384,13 @@ def tile_rows_worker(jobs, results, cfg):
             c0, c1, r0, r1 = job
             pending = [None] * (depth + 1)  # per level: (pixels, stored) of an upper row awaiting its pair
             for ty in range(r0, r1):
-                tiles, stats = [], {"empty_skipped": 0, "binary_alpha_tiles": 0, "overview_tiles": 0}
+                tiles, source, stats = [], [], {"empty_skipped": 0, "binary_alpha_tiles": 0, "overview_tiles": 0}
                 canvas = read_row(ty, c0, c1)
                 row = (canvas, base_tiles(canvas, ty, c0, tiles, stats))
                 level, row_index, col0 = 0, ty, c0
+                if lossy and depth == 0:  # the base itself is the lowest level the workers build
+                    source += [t[:3] + (encode(row[0][:, (t[1] - c0) * ts:(t[1] - c0 + 1) * ts], LOSSLESS_SOURCE),)
+                               for t in tiles]
                 while level < depth:
                     if pending[level] is None:
                         pending[level] = row
@@ -373,10 +402,15 @@ def tile_rows_worker(jobs, results, cfg):
                     pixels = reduce_rows(top, bottom)
                     z = zoom - level
                     for i in np.flatnonzero(stored).tolist():  # Python ints: numpy ints are stored as BLOBs
-                        tiles.append((z, col0 + i, 2 ** z - 1 - row_index, encode(pixels[:, i * ts:(i + 1) * ts])))
+                        tile_pixels = pixels[:, i * ts:(i + 1) * ts]
+                        key = (z, col0 + i, 2 ** z - 1 - row_index)
+                        tiles.append(key + (encode(tile_pixels),))
+                        if lossy and level == depth:  # lower levels are built from this, never from lossy tiles
+                            source.append(key + (encode(tile_pixels, LOSSLESS_SOURCE),))
                     stats["overview_tiles"] += int(stored.sum())
                     row = (pixels, stored)
-                results.put(("tiles", tiles, stats))
+                results.put(("tiles", (tiles, source), stats))
+            results.put(("rect", job, None))  # every row of it is on the queue before this
         results.put(("done", None, None))
     except BaseException:
         results.put(("error", traceback.format_exc(), None))
@@ -395,20 +429,37 @@ def plan_rectangles(layout, threads, depth):
     return rectangles, rows * len(bands)
 
 
-def write_base(db, vrt, cut, layout, args, max_depth):
-    """Base tiles and up to `max_depth` levels below them from worker processes; return (stats, depth).
+def plan_base(layout, threads, max_depth):
+    """(depth, rectangles, rows of work) for the base pass.
 
     Alignment to blocks of 2**depth tiles can leave a small raster (one plan)
     with fewer rectangles than workers; the depth is then lowered until every
     worker has at least MIN_JOBS_PER_WORKER rectangles, so pixels and speed
-    do not depend on it. This process is the only SQLite writer.
+    do not depend on it.
     """
     if layout["width"] <= 0 or layout["height"] <= 0:
         raise TileError("Warped raster is empty")
     for depth in range(max_depth, -1, -1):
-        rectangles, total = plan_rectangles(layout, args.threads, depth)
-        if len(rectangles) >= args.threads * MIN_JOBS_PER_WORKER:
+        rectangles, total = plan_rectangles(layout, threads, depth)
+        if len(rectangles) >= threads * MIN_JOBS_PER_WORKER:
             break
+    return depth, rectangles, total
+
+
+def write_base(db, vrt, cut, layout, args, plan, done):
+    """Base tiles and `depth` levels below them from worker processes; return stats.
+
+    `plan` is (depth, rectangles, rows) fixed when the output was started, so a
+    resumed run cuts the same rectangles whatever --threads it gets. Rectangles
+    in `done` are skipped; each finished one is recorded in the transaction of
+    its last row, and rows of an unfinished one are simply written again
+    (tiles are deterministic). This process is the only SQLite writer.
+    """
+    depth, rectangles, total = plan
+    rectangles = [r for r in rectangles if tuple(r) not in done]
+    stats = {"tiles": 0, "empty_skipped": 0, "binary_alpha_tiles": 0, "overview_tiles": 0}
+    if not rectangles:
+        return stats
     workers = min(args.threads, len(rectangles))
     ctx = multiprocessing.get_context("spawn")
     jobs, results = ctx.Queue(), ctx.Queue(maxsize=2 * workers)  # bounded: a slow writer slows the workers
@@ -420,7 +471,6 @@ def write_base(db, vrt, cut, layout, args, max_depth):
            "binary_alpha": args.binary_alpha, "keep_empty": args.keep_empty,
            "inside": TileRange(layout)}
     procs = [ctx.Process(target=tile_rows_worker, args=(jobs, results, cfg), daemon=True) for _ in range(workers)]
-    stats = {"tiles": 0, "empty_skipped": 0, "binary_alpha_tiles": 0, "overview_tiles": 0}
     done_rows, start, last_log = 0, time.monotonic(), time.monotonic()
     for p in procs:
         p.start()
@@ -439,9 +489,15 @@ def write_base(db, vrt, cut, layout, args, max_depth):
             if kind == "done":
                 finished += 1
                 continue
-            db.executemany("INSERT INTO tiles VALUES(?,?,?,?)", payload)
+            if kind == "rect":
+                db.execute("INSERT INTO _mbmerge_tile_done VALUES(?,?,?,?)", tuple(payload))
+                db.commit()
+                continue
+            tiles, source = payload
+            db.executemany("INSERT OR REPLACE INTO tiles VALUES(?,?,?,?)", tiles)
+            db.executemany("INSERT OR REPLACE INTO src.tiles VALUES(?,?,?,?)", source)
             db.commit()
-            stats["tiles"] += len(payload) - counts["overview_tiles"]
+            stats["tiles"] += len(tiles) - counts["overview_tiles"]
             for key, value in counts.items():
                 stats[key] += value
             done_rows += 1
@@ -457,7 +513,7 @@ def write_base(db, vrt, cut, layout, args, max_depth):
             p.join()
     log(args, "base", zoom=layout["zoom"], levels=depth, workers=workers,
         seconds=round(time.monotonic() - start, 1), **stats)
-    return stats, depth
+    return stats
 
 
 class TileRange:
@@ -475,17 +531,17 @@ class TileRange:
         return tx0 <= tx <= tx1 and ty0 <= ty <= ty1
 
 
-def children_of(db, z, x, y):
+def children_of(db, z, x, y, table="tiles"):
     """The four child blobs of parent z/x/y (None where missing), in CHILD_OFFSETS order."""
     out = []
     for dx, dy in CHILD_OFFSETS:
-        row = db.execute("SELECT tile_data FROM tiles WHERE zoom_level=? AND tile_column=? AND tile_row=?",
+        row = db.execute(f"SELECT tile_data FROM {table} WHERE zoom_level=? AND tile_column=? AND tile_row=?",
                          (z + 1, 2 * x + dx, 2 * y + dy)).fetchone()
         out.append(row[0] if row else None)
     return tuple(out)
 
 
-def write_overviews(db, zoom, min_zoom, args):
+def write_overviews(db, zoom, min_zoom, args, done_levels=()):
     """Levels zoom-1 .. min_zoom from the level below, as `merge` builds its pyramid.
 
     The parent reads the children of the next parents while the workers encode,
@@ -495,24 +551,32 @@ def write_overviews(db, zoom, min_zoom, args):
     ctx = multiprocessing.get_context("spawn")
     with ProcessPoolExecutor(max_workers=args.threads, mp_context=ctx, initializer=worker_init) as pool:
         for z in range(zoom - 1, min_zoom - 1, -1):
+            if z in done_levels:
+                continue
             start = time.monotonic()
             parents = db.execute("SELECT DISTINCT tile_column / 2, tile_row / 2 FROM tiles WHERE zoom_level = ?",
                                  (z + 1,)).fetchall()
+            # lossy output: children come from the lossless copies, so no level is built from decoded lossy tiles
+            table = "src.tiles" if args.quality is not None else "tiles"
             pending, rows = deque(), []
 
             def drain(limit):
                 while len(pending) > limit:
                     rows.append(pending.popleft().result())
                 if len(rows) >= OVERVIEW_COMMIT or (limit == 0 and rows):
-                    db.executemany("INSERT INTO tiles VALUES(?,?,?,?)", rows)
+                    db.executemany("INSERT OR REPLACE INTO tiles VALUES(?,?,?,?)", [r[:4] for r in rows])
+                    db.executemany("INSERT OR REPLACE INTO src.tiles VALUES(?,?,?,?)",
+                                   [r[:3] + (r[4],) for r in rows if r[4] is not None])
                     db.commit()
                     rows.clear()
 
             for x, y in parents:
-                pending.append(pool.submit(overview_tile, (z, x, y, children_of(db, z, x, y)), args.tile_size,
+                pending.append(pool.submit(overview_tile, (z, x, y, children_of(db, z, x, y, table)), args.tile_size,
                                            encoding(args)))
                 drain(OVERVIEW_INFLIGHT * args.threads)
             drain(0)
+            db.execute("INSERT INTO _mbmerge_tile_state VALUES(?, '1')", (f"overview:{z}",))
+            db.commit()
             written += len(parents)
             log(args, "overviews", zoom=z, tiles=len(parents), seconds=round(time.monotonic() - start, 1))
     return written
@@ -527,25 +591,90 @@ def wgs84_bounds(path, args):
     return min(xs), min(ys), max(xs), max(ys)
 
 
-def write_mbtiles(output, vrt, cut, zoom, min_zoom, args, settings):
-    """Base tiles, overviews and metadata into `output` (via a temporary file and rename)."""
-    tmp = output.with_name(output.name + ".tmp")
+STATE_TABLES = ("_mbmerge_tile_state", "_mbmerge_tile_done")
+# Lossless copies of the lowest worker level (lossy output only) live in a side file next to the
+# .tmp, attached as `src`: dropping them from the output itself would leave its size in free pages.
+TILES_DDL = """CREATE TABLE IF NOT EXISTS {0}tiles(zoom_level INTEGER NOT NULL, tile_column INTEGER NOT NULL,
+  tile_row INTEGER NOT NULL, tile_data BLOB NOT NULL);
+CREATE UNIQUE INDEX IF NOT EXISTS {0}tile_index ON tiles(zoom_level, tile_column, tile_row);"""
+
+
+def source_path(tmp):
+    return tmp.with_name(tmp.name + "-src")
+
+
+def attach_source(db, tmp):
+    db.execute("ATTACH DATABASE ? AS src", (str(source_path(tmp)),))
+    db.execute("PRAGMA src.journal_mode=WAL")
+    db.execute("PRAGMA src.synchronous=NORMAL")
+    db.executescript(TILES_DDL.format("src."))
+
+
+def open_output(tmp, layout, args, settings, inputs, max_depth):
+    """New or resumed `<output>.tmp`; return (db, plan, finished rectangles, finished overview levels).
+
+    A run that fails or is killed leaves the .tmp file; --resume continues it
+    when the warp and every setting are the same, otherwise refuses.
+    """
+    contract = json.dumps({"settings": settings, "inputs": inputs, "layout": {k: v for k, v in layout.items() if k != "origin"},
+                           "origin": list(layout["origin"])}, sort_keys=True)
+    if args.resume and tmp.exists():
+        db = sqlite3.connect(tmp)
+        try:
+            state = dict(db.execute("SELECT name, value FROM _mbmerge_tile_state"))
+        except sqlite3.Error:
+            db.close()
+            raise TileError(f"{tmp} is not a resumable tile output; remove it or run without --resume") from None
+        if state.get("contract") != contract:
+            db.close()
+            raise TileError(f"{tmp} was started with other inputs or settings; remove it or run without --resume")
+        depth, rectangles, total = json.loads(state["plan"])
+        done = {tuple(r) for r in db.execute("SELECT * FROM _mbmerge_tile_done")}
+        levels = {int(k.split(":")[1]) for k in state if k.startswith("overview:")}
+        log(args, "resume", rectangles_done=len(done), rectangles=len(rectangles), overview_levels_done=len(levels))
+        return db, (depth, [tuple(r) for r in rectangles], total), done, levels
     tmp.unlink(missing_ok=True)
-    layout = tile_layout(info(vrt, args), zoom, args.tile_size)
+    for suffix in ("-wal", "-shm", "-src", "-src-wal", "-src-shm"):
+        Path(f"{tmp}{suffix}").unlink(missing_ok=True)
+    plan = plan_base(layout, args.threads, max_depth)
     db = sqlite3.connect(tmp)
+    db.execute(f"PRAGMA page_size={args.page_size}")
+    db.executescript("""
+        CREATE TABLE metadata(name TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE tiles(zoom_level INTEGER NOT NULL, tile_column INTEGER NOT NULL,
+          tile_row INTEGER NOT NULL, tile_data BLOB NOT NULL);
+        CREATE UNIQUE INDEX tile_index ON tiles(zoom_level, tile_column, tile_row);
+        CREATE TABLE _mbmerge_tile_state(name TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE _mbmerge_tile_done(c0 INTEGER, c1 INTEGER, r0 INTEGER, r1 INTEGER);""")
+    db.executemany("INSERT INTO _mbmerge_tile_state VALUES(?,?)",
+                   [("contract", contract), ("plan", json.dumps(plan))])
+    db.commit()
+    return db, plan, set(), set()
+
+
+def write_mbtiles(output, vrt, cut, zoom, min_zoom, args, settings, inputs=()):
+    """Base tiles, overviews and metadata into `output` via `<output>.tmp` and rename.
+
+    The .tmp file is committed after every row of tiles (WAL, synchronous=NORMAL:
+    a killed process loses at most the rows in flight) and kept on failure, so
+    `--resume` continues instead of starting over.
+    """
+    tmp = output.with_name(output.name + ".tmp")
+    layout = tile_layout(info(vrt, args), zoom, args.tile_size)
+    db, plan, done, levels = open_output(tmp, layout, args, settings, list(inputs), min(PYRAMID_DEPTH, zoom - min_zoom))
     try:
-        db.execute(f"PRAGMA page_size={args.page_size}")
-        db.execute("PRAGMA synchronous=OFF")  # a crash leaves only the .tmp file, which is discarded
-        db.executescript("""
-            CREATE TABLE metadata(name TEXT PRIMARY KEY, value TEXT NOT NULL);
-            CREATE TABLE tiles(zoom_level INTEGER NOT NULL, tile_column INTEGER NOT NULL,
-              tile_row INTEGER NOT NULL, tile_data BLOB NOT NULL);
-            CREATE UNIQUE INDEX tile_index ON tiles(zoom_level, tile_column, tile_row);""")
-        stats, depth = write_base(db, vrt, cut, layout, args, min(PYRAMID_DEPTH, zoom - min_zoom))
-        if not stats["tiles"]:
+        db.execute("PRAGMA journal_mode=WAL")
+        db.execute("PRAGMA synchronous=NORMAL")
+        attach_source(db, tmp)
+        stats = write_base(db, vrt, cut, layout, args, plan, done)
+        depth = plan[0]
+        if not db.execute("SELECT 1 FROM tiles WHERE zoom_level = ? LIMIT 1", (zoom,)).fetchone():
+            db.close()
+            for suffix in ("", "-wal", "-shm", "-src", "-src-wal", "-src-shm"):
+                Path(f"{tmp}{suffix}").unlink(missing_ok=True)
             raise TileError("No nonempty tiles: the input is fully transparent after nodata/cutline handling")
         if min_zoom < zoom - depth:
-            stats["overview_tiles"] += write_overviews(db, zoom - depth, min_zoom, args)
+            stats["overview_tiles"] += write_overviews(db, zoom - depth, min_zoom, args, levels)
         meta = {"name": args.name or output.stem, "format": args.format, "type": "overlay", "version": "1.3",
                 "scheme": "tms", "minzoom": str(min_zoom), "maxzoom": str(zoom),
                 "mbmerge:tile": json.dumps(settings, ensure_ascii=False),
@@ -555,14 +684,25 @@ def write_mbtiles(output, vrt, cut, zoom, min_zoom, args, settings):
             w, s, e, n = bounds
             meta["bounds"] = f"{w:.8f},{s:.8f},{e:.8f},{n:.8f}"
             meta["center"] = f"{(w + e) / 2:.8f},{(s + n) / 2:.8f},{zoom}"
-        db.executemany("INSERT INTO metadata VALUES(?,?)", meta.items())
+        db.executemany("INSERT OR REPLACE INTO metadata VALUES(?,?)", meta.items())
+        for table in STATE_TABLES:
+            db.execute(f"DROP TABLE {table}")
         db.commit()
+        db.execute("DETACH DATABASE src")
+        db.execute("PRAGMA journal_mode=DELETE")  # one self-contained file, no -wal/-shm next to it
+        # no VACUUM: it would rewrite a country-sized file; only rows replaced on resume leave free pages
     except BaseException:
-        db.close()
-        tmp.unlink(missing_ok=True)
+        try:
+            db.close()
+        except sqlite3.Error:
+            pass
+        if tmp.exists():
+            log(args, "kept", path=tmp, hint="rerun with --resume to continue")
         raise
     db.close()
     os.replace(tmp, output)
+    for suffix in ("-src", "-src-wal", "-src-shm"):
+        Path(f"{tmp}{suffix}").unlink(missing_ok=True)
     return stats
 
 
@@ -605,7 +745,9 @@ def tile(args):
                     "collar": [list(c) for c in args.collar], "near": args.near if args.collar else None,
                     "binary_alpha": args.binary_alpha, "cutline": bool(args.cutline), "cwhere": args.cwhere,
                     "inputs": len(files)}
-        stats = write_mbtiles(output, warped, cut, zoom, min_zoom, args, settings)
+        # path, size and mtime of every input: resuming over changed sources would mix two versions
+        inputs = [[str(f), f.stat().st_size, f.stat().st_mtime_ns] for f in map(Path, files)]
+        stats = write_mbtiles(output, warped, cut, zoom, min_zoom, args, settings, inputs)
     log(args, "tiled", output=output, zoom=zoom, min_zoom=min_zoom, resampling=resampling, **stats)
     return stats
 
@@ -617,6 +759,8 @@ def add_parser(sub, positive):
     t.add_argument("--pattern", default="*.tif", help="glob within --input-dir; ** supported")
     t.add_argument("--output", required=True)
     t.add_argument("--overwrite", action="store_true")
+    t.add_argument("--resume", action="store_true",
+                   help="continue <output>.tmp left by an interrupted run with the same inputs and settings")
     t.add_argument("--zoom", type=int, choices=range(31), metavar="Z",
                    help="base zoom; default: nearest to the source resolution")
     t.add_argument("--min-zoom", type=int, choices=range(31), metavar="Z",
