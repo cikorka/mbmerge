@@ -175,6 +175,26 @@ class TileTests(unittest.TestCase):
         cols = {k[1] for k in all_tiles(out)}
         self.assertEqual(cols, {COL, COL + 1})
 
+    def test_cutline_larger_than_input_is_limited_to_the_input(self):
+        """A country-wide cutline over one sheet: same tiles, and the warp only spans the sheet."""
+        im = Image.new("RGB", (256, 256), (30, 200, 30))
+        ulx, uly = -WORLD / 2 + COL * TS * RES, WORLD / 2 - ROW * TS * RES
+        far = 10000 * TS * RES  # thousands of tiles beyond the raster on every side
+        poly = [[ulx - far, uly + far], [ulx + far, uly + far], [ulx + far, uly - far], [ulx - far, uly - far],
+                [ulx - far, uly + far]]
+        cut = self.root / "big.geojson"
+        cut.write_text(json.dumps({"type": "FeatureCollection",
+                                   "crs": {"type": "name", "properties": {"name": "EPSG:3857"}},
+                                   "features": [{"type": "Feature", "properties": {},
+                                                 "geometry": {"type": "Polygon", "coordinates": [poly]}}]}))
+        plain, _ = self.tile(self.geotiff(im))
+        clipped, _ = self.tile(self.geotiff(im), output=self.root / "big.mbtiles", extra=["--cutline", cut])
+        self.assertEqual(all_tiles(clipped), all_tiles(plain))
+        bounds = [[float(v) for v in sqlite3.connect(p).execute(
+            "SELECT value FROM metadata WHERE name = 'bounds'").fetchone()[0].split(",")] for p in (plain, clipped)]
+        for a, b in zip(*bounds):  # the warp spans the raster (± a snapped pixel), not ~10000 tiles of the cutline
+            self.assertAlmostEqual(a, b, delta=0.01)
+
     def test_neighbours_clipped_by_shared_boundary_are_complementary(self):
         """Different source grids, one diagonal boundary: no overlap and no crack."""
         ulx, uly = -WORLD / 2 + COL * TS * RES, WORLD / 2 - ROW * TS * RES
@@ -265,6 +285,58 @@ class TileTests(unittest.TestCase):
                                "--output", str(out)], capture_output=True, text=True)
         self.assertEqual(proc.returncode, 1)
         self.assertEqual(out.read_bytes(), b"keep")
+
+    def test_resume_after_kill_matches_an_uninterrupted_run(self):
+        """SIGKILL during the base pass leaves <output>.tmp; --resume (other --threads) finishes it identically."""
+        import random
+        import signal
+        import time
+        rnd = random.Random(7)
+        im = Image.new("RGB", (64 * 24, 64 * 24))
+        im.putdata([(rnd.randrange(256), rnd.randrange(256), rnd.randrange(256)) for _ in range(im.width * im.height)])
+        src = self.geotiff(im, tiles=(24, 24))
+        clean, _ = self.tile(src, output=self.root / "clean.mbtiles", extra=["--min-zoom", Z - 6, "--webp-method", 6])
+        out = self.root / "resumed.mbtiles"
+        tmp = out.with_name(out.name + ".tmp")
+        cmd = [sys.executable, str(ROOT / "merge_mbtiles.py"), "tile", str(src), "--output", str(out), "--zoom", str(Z),
+               "--tile-size", str(TS), "--threads", "2", "--min-zoom", str(Z - 6), "--webp-method", "6"]
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline and proc.poll() is None:
+            try:
+                db = sqlite3.connect(f"file:{tmp}?mode=ro", uri=True)
+                try:  # closed explicitly: an open WAL reader would block the final journal switch
+                    if db.execute("SELECT count(*) FROM _mbmerge_tile_done").fetchone()[0]:
+                        break
+                finally:
+                    db.close()
+            except sqlite3.Error:
+                pass
+            time.sleep(0.05)
+        self.assertIsNone(proc.poll(), "finished before it could be killed; enlarge the raster")
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+        self.assertFalse(out.exists())
+        resumed = subprocess.run(cmd[:-6] + ["--threads", "3", "--min-zoom", str(Z - 6), "--webp-method", "6",
+                                             "--resume", "--json-log"], capture_output=True, text=True, timeout=120)
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        self.assertIn('"event": "resume"', resumed.stderr)
+        self.assertFalse(tmp.exists())
+        db = sqlite3.connect(out)
+        tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        db.close()
+        self.assertEqual(tables, {"metadata", "tiles"})
+        self.assertEqual(all_tiles(out), all_tiles(clean))
+
+    def test_resume_refuses_other_settings(self):
+        src = self.geotiff(Image.new("RGB", (256, 256), (10, 20, 30)))
+        out = self.root / "r.mbtiles"
+        tmp = out.with_name(out.name + ".tmp")
+        self.tile(src, output=out)
+        out.rename(tmp)  # stands in for a killed run: same file, but its state tables are gone
+        _, proc = self.tile(src, output=out, extra=["--resume"], check=False)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("not a resumable", proc.stderr)
 
 
 if __name__ == "__main__":
