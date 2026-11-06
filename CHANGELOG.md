@@ -2,7 +2,7 @@
 
 **English** | [Čeština](CHANGELOG.cs.md)
 
-## 2.3.0 — unreleased
+## 2.3.0 — 2026-11-06
 
 - `tile --resume` continues `<output>.tmp` left by a failed or killed run (committed after every row of tiles, WAL). Finished work rectangles and overview levels are skipped; inputs (path, size, mtime) and settings must be unchanged, `--threads` may differ. Measured on an orthophoto killed after 10 minutes: the resumed output is byte-identical to an uninterrupted run.
 - `tile --cutline` limits the warp to the intersection of the polygon with the input. A country boundary over one orthophoto sheet used to walk the empty rows of the whole country (estimated 27 h instead of 30 min).
@@ -11,7 +11,7 @@
 - `tile` reads the headers of plain inputs in-process and gives `--s-srs` once to the whole mosaic when every input needs only that (no PDF, palette, `--collar`, `--nodata`): preparing 16 316 orthophoto sheets took 13 s instead of 38 min. Mosaics take the finest input resolution (`-resolution highest`), not the average. A JPEG with a broken EXIF block (reported as an error, pixels fine) no longer stops the header check or the workers; a read that returns no data still does.
 - `mbmerge compare` scores MBTiles against a direct render of their sources (PSNR, 5th percentile, SSIM per zoom; needs scikit-image). `tools/benchmark_tile_workers.py` measures worker memory and speed in a fixed window.
 
-## 2.2.0 — unreleased
+## 2.2.0 — 2026-11-03
 
 - `tile` builds the first four levels below the base (`PYRAMID_DEPTH`) in the worker processes, from the pixels they have just encoded, instead of decoding stored tiles: work rectangles are aligned to blocks of 16 × 16 tiles and one pending row per level is kept (about 30 MB per worker). Lossless outputs are pixel-identical to 2.1.0 at every zoom. With `--quality 85`, z18–z15 are about 1 dB closer to the lossless pyramid (no repeated lossy round trip), and an orthophoto of 12 sheets took about 9 % less CPU time. Small rasters with fewer rectangles than workers use a shallower depth, so they keep using every worker.
 - Overview tile keys are stored as integers (a numpy integer would have been stored as a BLOB).

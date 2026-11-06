@@ -2,7 +2,7 @@
 
 [English](CHANGELOG.md) | **Čeština**
 
-## 2.3.0 — nevydáno
+## 2.3.0 — 2026-11-06
 
 - `tile --resume` pokračuje v `<výstup>.tmp`, který zůstal po chybě či zabití procesu (commit po každé řadě dlaždic, WAL). Hotové pracovní obdélníky a úrovně pyramidy přeskočí; vstupy (cesta, velikost, mtime) a nastavení musí být stejné, `--threads` se smí lišit. Změřeno na ortofotu zabitém po 10 minutách: navázaný výstup je bajtově shodný s nepřerušeným během.
 - `tile --cutline` omezí warp na průnik polygonu se vstupem. Hranice republiky nad jedním listem ortofota dřív procházela prázdné řádky celé země (odhad 27 h místo 30 min).
@@ -11,7 +11,7 @@
 - `tile` čte hlavičky prostých vstupů přímo v procesu a `--s-srs` dá jednou celé mozaice, když ho všechny vstupy potřebují jako jediné (bez PDF, palety, `--collar`, `--nodata`): příprava 16 316 listů ortofota trvala 13 s místo 38 min. Mozaika bere nejjemnější rozlišení vstupů (`-resolution highest`), ne průměr. JPEG s poškozeným blokem EXIF (GDAL hlásí chybu, pixely jsou v pořádku) už nezastaví kontrolu hlaviček ani pracovní procesy; čtení, které nevrátí data, ano.
 - `mbmerge compare` porovná MBTiles s přímým renderem zdrojů (PSNR, 5. percentil, SSIM po zoomech; potřebuje scikit-image). `tools/benchmark_tile_workers.py` měří paměť a rychlost pracovních procesů v pevném okně.
 
-## 2.2.0 — nevydáno
+## 2.2.0 — 2026-11-03
 
 - `tile` staví první čtyři úrovně pod základem (`PYRAMID_DEPTH`) přímo v pracovních procesech, z pixelů, které právě zakódovaly, místo dekódování uložených dlaždic: pracovní obdélníky jsou zarovnané na bloky 16 × 16 dlaždic a pro každou úroveň se drží jedna rozpracovaná řada (asi 30 MB na proces). Bezztrátové výstupy jsou pixelově shodné s 2.1.0 na všech zoomech. S `--quality 85` jsou z18–z15 asi o 1 dB blíž bezztrátové pyramidě (bez opakované ztrátové komprese) a ortofoto z 12 listů spotřebovalo asi o 9 % méně času procesoru. Malé rastry s méně obdélníky, než je procesů, použijí menší hloubku, aby dál pracovaly všechny procesy.
 - Klíče dlaždic přehledů se ukládají jako celá čísla (celé číslo z numpy by se uložilo jako BLOB).
