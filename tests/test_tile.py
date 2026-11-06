@@ -338,6 +338,27 @@ class TileTests(unittest.TestCase):
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("not a resumable", proc.stderr)
 
+    def test_lossy_levels_below_the_workers_are_built_from_lossless_pixels(self):
+        """Every lossy tile is the lossy encoding of the exact lossless tile, also below PYRAMID_DEPTH."""
+        import io
+        import random
+        rnd = random.Random(3)
+        im = Image.new("RGB", (64 * 24, 64 * 24))
+        im.putdata([(rnd.randrange(256), rnd.randrange(256), rnd.randrange(256)) for _ in range(im.width * im.height)])
+        src = self.geotiff(im, tiles=(24, 24))
+        exact, _ = self.tile(src, output=self.root / "exact.mbtiles", extra=["--min-zoom", Z - 6])
+        lossy, proc = self.tile(src, output=self.root / "lossy.mbtiles", extra=["--min-zoom", Z - 6, "--quality", 60])
+        self.assertIn('"event": "overviews"', proc.stderr)  # some levels really come from stored tiles
+        exact_tiles, lossy_tiles = all_tiles(exact), all_tiles(lossy)
+        self.assertEqual(set(exact_tiles), set(lossy_tiles))
+        for key, data in exact_tiles.items():
+            out = io.BytesIO()
+            rgba(data).save(out, "WEBP", quality=60, method=4)
+            self.assertEqual(lossy_tiles[key], out.getvalue(), key)
+        with sqlite3.connect(lossy) as db:
+            tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        self.assertEqual(tables, {"metadata", "tiles"})
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -19,8 +19,9 @@ which must belong to the same libgdal):
    The parent is the only SQLite writer; nothing is staged on disk.
 5. levels down to --min-zoom: 2x2 average with premultiplied alpha, the same
    method `merge` uses for its pyramid. The workers build the first
-   PYRAMID_DEPTH levels from the pixels they have just encoded (never from
-   decoded lossy tiles); lower levels come from the stored tiles above.
+   PYRAMID_DEPTH levels from the pixels they have just encoded; lower levels
+   come from the stored tiles above. With --quality those are lossless copies
+   kept until the end, so no level is ever averaged from decoded lossy tiles.
 
 Only fully transparent tiles count as empty. Colors are never interpreted while
 tiling: turning black/white collars into transparency is step 1's job, before
@@ -261,6 +262,9 @@ def tile_layout(meta, zoom, tile_size):
             "ty0": py0 // tile_size, "ty1": (py0 + height - 1) // tile_size}
 
 
+LOSSLESS_SOURCE = {"format": "webp", "quality": None, "webp_method": 0, "png_compress_level": 1}
+
+
 def encode_tile(im, enc):
     """RGBA image -> tile bytes: lossless WebP/PNG, or lossy WebP when enc['quality'] is set."""
     out = io.BytesIO()
@@ -284,7 +288,8 @@ def overview_tile(job, tile_size, enc):
                     canvas.paste(child.convert("RGBA"), (dx * tile_size, (1 - dy) * tile_size))
         with canvas.convert("RGBa") as premultiplied, premultiplied.reduce(2) as reduced:
             with reduced.convert("RGBA") as result:
-                return z, x, y, encode_tile(result, enc)
+                source = encode_tile(result, LOSSLESS_SOURCE) if enc["quality"] is not None else None
+                return z, x, y, encode_tile(result, enc), source
 
 
 def encoding(args):
@@ -321,8 +326,10 @@ def tile_rows_worker(jobs, results, cfg):
         px0, py0, width, height = cfg["px0"], cfg["py0"], cfg["width"], cfg["height"]
         zoom, depth, threshold = cfg["zoom"], cfg["depth"], cfg["binary_alpha"]
 
-        def encode(pixels):
-            return encode_tile(Image.fromarray(np.ascontiguousarray(pixels), "RGBA"), cfg)
+        lossy = cfg["quality"] is not None
+
+        def encode(pixels, enc=cfg):
+            return encode_tile(Image.fromarray(np.ascontiguousarray(pixels), "RGBA"), enc)
 
         def read_row(ty, c0, c1):
             """One row of base tiles as RGBA; zeros outside the warp."""
@@ -377,10 +384,13 @@ def tile_rows_worker(jobs, results, cfg):
             c0, c1, r0, r1 = job
             pending = [None] * (depth + 1)  # per level: (pixels, stored) of an upper row awaiting its pair
             for ty in range(r0, r1):
-                tiles, stats = [], {"empty_skipped": 0, "binary_alpha_tiles": 0, "overview_tiles": 0}
+                tiles, source, stats = [], [], {"empty_skipped": 0, "binary_alpha_tiles": 0, "overview_tiles": 0}
                 canvas = read_row(ty, c0, c1)
                 row = (canvas, base_tiles(canvas, ty, c0, tiles, stats))
                 level, row_index, col0 = 0, ty, c0
+                if lossy and depth == 0:  # the base itself is the lowest level the workers build
+                    source += [t[:3] + (encode(row[0][:, (t[1] - c0) * ts:(t[1] - c0 + 1) * ts], LOSSLESS_SOURCE),)
+                               for t in tiles]
                 while level < depth:
                     if pending[level] is None:
                         pending[level] = row
@@ -392,10 +402,14 @@ def tile_rows_worker(jobs, results, cfg):
                     pixels = reduce_rows(top, bottom)
                     z = zoom - level
                     for i in np.flatnonzero(stored).tolist():  # Python ints: numpy ints are stored as BLOBs
-                        tiles.append((z, col0 + i, 2 ** z - 1 - row_index, encode(pixels[:, i * ts:(i + 1) * ts])))
+                        tile_pixels = pixels[:, i * ts:(i + 1) * ts]
+                        key = (z, col0 + i, 2 ** z - 1 - row_index)
+                        tiles.append(key + (encode(tile_pixels),))
+                        if lossy and level == depth:  # lower levels are built from this, never from lossy tiles
+                            source.append(key + (encode(tile_pixels, LOSSLESS_SOURCE),))
                     stats["overview_tiles"] += int(stored.sum())
                     row = (pixels, stored)
-                results.put(("tiles", tiles, stats))
+                results.put(("tiles", (tiles, source), stats))
             results.put(("rect", job, None))  # every row of it is on the queue before this
         results.put(("done", None, None))
     except BaseException:
@@ -479,9 +493,11 @@ def write_base(db, vrt, cut, layout, args, plan, done):
                 db.execute("INSERT INTO _mbmerge_tile_done VALUES(?,?,?,?)", tuple(payload))
                 db.commit()
                 continue
-            db.executemany("INSERT OR REPLACE INTO tiles VALUES(?,?,?,?)", payload)
+            tiles, source = payload
+            db.executemany("INSERT OR REPLACE INTO tiles VALUES(?,?,?,?)", tiles)
+            db.executemany("INSERT OR REPLACE INTO _mbmerge_tile_src VALUES(?,?,?,?)", source)
             db.commit()
-            stats["tiles"] += len(payload) - counts["overview_tiles"]
+            stats["tiles"] += len(tiles) - counts["overview_tiles"]
             for key, value in counts.items():
                 stats[key] += value
             done_rows += 1
@@ -515,11 +531,11 @@ class TileRange:
         return tx0 <= tx <= tx1 and ty0 <= ty <= ty1
 
 
-def children_of(db, z, x, y):
+def children_of(db, z, x, y, table="tiles"):
     """The four child blobs of parent z/x/y (None where missing), in CHILD_OFFSETS order."""
     out = []
     for dx, dy in CHILD_OFFSETS:
-        row = db.execute("SELECT tile_data FROM tiles WHERE zoom_level=? AND tile_column=? AND tile_row=?",
+        row = db.execute(f"SELECT tile_data FROM {table} WHERE zoom_level=? AND tile_column=? AND tile_row=?",
                          (z + 1, 2 * x + dx, 2 * y + dy)).fetchone()
         out.append(row[0] if row else None)
     return tuple(out)
@@ -540,18 +556,22 @@ def write_overviews(db, zoom, min_zoom, args, done_levels=()):
             start = time.monotonic()
             parents = db.execute("SELECT DISTINCT tile_column / 2, tile_row / 2 FROM tiles WHERE zoom_level = ?",
                                  (z + 1,)).fetchall()
+            # lossy output: children come from the lossless copies, so no level is built from decoded lossy tiles
+            table = "_mbmerge_tile_src" if args.quality is not None else "tiles"
             pending, rows = deque(), []
 
             def drain(limit):
                 while len(pending) > limit:
                     rows.append(pending.popleft().result())
                 if len(rows) >= OVERVIEW_COMMIT or (limit == 0 and rows):
-                    db.executemany("INSERT OR REPLACE INTO tiles VALUES(?,?,?,?)", rows)
+                    db.executemany("INSERT OR REPLACE INTO tiles VALUES(?,?,?,?)", [r[:4] for r in rows])
+                    db.executemany("INSERT OR REPLACE INTO _mbmerge_tile_src VALUES(?,?,?,?)",
+                                   [r[:3] + (r[4],) for r in rows if r[4] is not None])
                     db.commit()
                     rows.clear()
 
             for x, y in parents:
-                pending.append(pool.submit(overview_tile, (z, x, y, children_of(db, z, x, y)), args.tile_size,
+                pending.append(pool.submit(overview_tile, (z, x, y, children_of(db, z, x, y, table)), args.tile_size,
                                            encoding(args)))
                 drain(OVERVIEW_INFLIGHT * args.threads)
             drain(0)
@@ -571,7 +591,7 @@ def wgs84_bounds(path, args):
     return min(xs), min(ys), max(xs), max(ys)
 
 
-STATE_TABLES = ("_mbmerge_tile_state", "_mbmerge_tile_done")
+STATE_TABLES = ("_mbmerge_tile_state", "_mbmerge_tile_done", "_mbmerge_tile_src")
 
 
 def open_output(tmp, layout, args, settings, inputs, max_depth):
@@ -609,7 +629,10 @@ def open_output(tmp, layout, args, settings, inputs, max_depth):
           tile_row INTEGER NOT NULL, tile_data BLOB NOT NULL);
         CREATE UNIQUE INDEX tile_index ON tiles(zoom_level, tile_column, tile_row);
         CREATE TABLE _mbmerge_tile_state(name TEXT PRIMARY KEY, value TEXT NOT NULL);
-        CREATE TABLE _mbmerge_tile_done(c0 INTEGER, c1 INTEGER, r0 INTEGER, r1 INTEGER);""")
+        CREATE TABLE _mbmerge_tile_done(c0 INTEGER, c1 INTEGER, r0 INTEGER, r1 INTEGER);
+        CREATE TABLE _mbmerge_tile_src(zoom_level INTEGER NOT NULL, tile_column INTEGER NOT NULL,
+          tile_row INTEGER NOT NULL, tile_data BLOB NOT NULL);
+        CREATE UNIQUE INDEX tile_src_index ON _mbmerge_tile_src(zoom_level, tile_column, tile_row);""")
     db.executemany("INSERT INTO _mbmerge_tile_state VALUES(?,?)",
                    [("contract", contract), ("plan", json.dumps(plan))])
     db.commit()
@@ -651,8 +674,8 @@ def write_mbtiles(output, vrt, cut, zoom, min_zoom, args, settings, inputs=()):
             db.execute(f"DROP TABLE {table}")
         db.commit()
         db.execute("PRAGMA journal_mode=DELETE")  # one self-contained file, no -wal/-shm next to it
-        if args.resume and done:
-            db.execute("VACUUM")  # replaced rows of resumed rectangles leave free pages
+        # no VACUUM: it would rewrite a country-sized file; the dropped pyramid source and rows replaced
+        # on resume leave free pages of the order of 1 % (one tile in 4**PYRAMID_DEPTH)
     except BaseException:
         try:
             db.close()
