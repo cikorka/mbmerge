@@ -44,6 +44,11 @@ def compare(args):
 
     gdal.UseExceptions()
     files = collect(args)
+    grader = None
+    if args.grade:  # the candidates were graded: grade the reference the same way, so only encoding loss is scored
+        from grade_mbtiles import Grader, load
+
+        grader = Grader(load(args.grade))
     candidates = {}
     for spec in args.candidate:
         name, sep, path = spec.partition("=")
@@ -78,6 +83,8 @@ def compare(args):
                 ref = gdal.Warp("", vrt, format="MEM", dstSRS="EPSG:3857", width=ts, height=ts,
                                 outputBounds=(minx, miny, minx + size, miny + size), resampleAlg=args.resampling,
                                 dstAlpha=True).ReadAsArray().transpose(1, 2, 0)
+                if grader is not None:
+                    ref = grader(np.ascontiguousarray(ref))
                 mask = ref[..., 3] == 255
                 for t in tiles.values():
                     mask &= t[..., 3] == 255
@@ -114,5 +121,6 @@ def add_parser(sub):
     c.add_argument("--samples", type=int, default=60, help="scored tiles per zoom (default 60)")
     c.add_argument("--resampling", default="average", help="of the reference render (default average)")
     c.add_argument("--seed", type=int, default=1)
+    c.add_argument("--grade", metavar="GRADE_JSON", help="grade the reference like `tile --grade` did")
     c.set_defaults(func=compare, json_log=False)
     return c

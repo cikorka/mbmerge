@@ -398,6 +398,8 @@ class TileTests(unittest.TestCase):
                                              "--resume", "--json-log"], capture_output=True, text=True, timeout=120)
         self.assertEqual(resumed.returncode, 0, resumed.stderr)
         self.assertIn('"event": "resume"', resumed.stderr)
+        base = json.loads(next(line for line in resumed.stderr.splitlines() if '"event": "base"' in line))
+        self.assertEqual(base["rows_done"], base["rows"])  # rows finished before the kill count towards progress
         self.assertFalse(tmp.exists())
         db = sqlite3.connect(out)
         tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}

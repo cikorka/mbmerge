@@ -125,6 +125,8 @@ The result is a flat TMS MBTiles (lossless WebP by default, or `--format png`) t
 
 **Resume.** The output is written to `<output>.tmp`, committed after every row of tiles and kept when the run fails or is killed. `--resume` continues it, finished work rectangles and overview levels included, when the inputs (path, size, mtime) and every setting are the same; otherwise it refuses. `--threads` may differ. The result is byte-identical to an uninterrupted run.
 
+**Colour grade.** `mbmerge grade` measures one grade for a whole mosaic and writes it as JSON; `tile --grade FILE` applies it to every pixel before encoding, so all levels inherit it and nothing is encoded twice. It is one function for every pixel — levels per channel (black/white point from histogram percentiles of all inputs read at 1/8, `--clip`), gamma (`--gamma auto` puts the median luma at `--target-median`), saturation and vibrance (more boost for dull colours than for saturated ones) — so it cannot create a seam between inputs. `mbmerge grade --preview FILE --at LON,LAT … --out DIR` renders before/after crops for tuning, `compare --grade` grades the reference the same way. A stretched image carries more detail and noise: expect larger tiles at the same `--quality`. The grade is part of the resume contract.
+
 Two adjacent sources clipped by the same boundary into the same grid get complementary pixels, so the merged mosaic has no seam and no overlap at that boundary.
 
 ## Bounded memory and one writer
