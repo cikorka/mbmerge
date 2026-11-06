@@ -2,6 +2,10 @@
 
 [English](CHANGELOG.md) | **Čeština**
 
+## 2.3.1 — 2026-11-06
+
+- `tile --cutline`: řady dlaždic, kterých se polygon nedotýká, se už ze zdrojů nečtou (dekódovaly se, převzorkovaly a pak ořízly do průhledna). Obálka hranice republiky leží zhruba z poloviny mimo ni, takže celostátní běh trávil hodiny na řadách bez jediné dlaždice. Výstup je bajtově shodný; přerušený běh 2.3.0 lze navázat přes `--resume`.
+
 ## 2.3.0 — 2026-11-06
 
 - `tile --resume` pokračuje v `<výstup>.tmp`, který zůstal po chybě či zabití procesu (commit po každé řadě dlaždic, WAL). Hotové pracovní obdélníky a úrovně pyramidy přeskočí; vstupy (cesta, velikost, mtime) a nastavení musí být stejné, `--threads` se smí lišit. Změřeno na ortofotu zabitém po 10 minutách: navázaný výstup je bajtově shodný s nepřerušeným během.

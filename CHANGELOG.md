@@ -2,6 +2,10 @@
 
 **English** | [Čeština](CHANGELOG.cs.md)
 
+## 2.3.1 — 2026-11-06
+
+- `tile --cutline`: rows of tiles that do not touch the polygon are no longer read from the sources (they were decoded, warped and then clipped to transparency). A country boundary has its bounding box about half outside the country, so a national run spent hours on rows without a single tile. Output is byte-identical; an interrupted 2.3.0 run can be continued with `--resume`.
+
 ## 2.3.0 — 2026-11-06
 
 - `tile --resume` continues `<output>.tmp` left by a failed or killed run (committed after every row of tiles, WAL). Finished work rectangles and overview levels are skipped; inputs (path, size, mtime) and settings must be unchanged, `--threads` may differ. Measured on an orthophoto killed after 10 minutes: the resumed output is byte-identical to an uninterrupted run.
