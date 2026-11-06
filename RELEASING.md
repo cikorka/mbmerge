@@ -8,7 +8,7 @@ The distribution name, repository name and installed command are **mbmerge**. Th
 
 `VERSION` in [merge_mbtiles.py](merge_mbtiles.py) is the single version source. Setuptools reads that literal for wheel/sdist metadata; the CLI prints it and `mbmerge.__version__` exposes it. Do not duplicate a version in pyproject.toml. The on-disk `SCHEMA_VERSION` is independent and follows the compatibility rules in [ARCHITECTURE.md](ARCHITECTURE.md).
 
-This checkout prepares `2.3.0`. Use tags `v2.3.0`, `v2.3.1`, etc. After publication, never replace a version or move its release tag. Publish a new version for changes. Updating this checkout or pushing its branch does not create a release.
+This checkout prepares `2.3.1`. Use tags `v2.3.1`, `v2.3.1`, etc. After publication, never replace a version or move its release tag. Publish a new version for changes. Updating this checkout or pushing its branch does not create a release.
 
 - Patch, e.g. `2.0.1`: compatible fixes.
 - Minor, e.g. `2.1.0`: compatible new functionality.
@@ -62,15 +62,15 @@ The first successful trusted publication creates the project. A pending publishe
 
 ```bash
 python -m pip install -r requirements.txt
-python -m pip install --index-url https://test.pypi.org/simple/ --no-deps 'mbmerge==2.3.0'
+python -m pip install --index-url https://test.pypi.org/simple/ --no-deps 'mbmerge==2.3.1'
 mbmerge --version
 ```
 
 3. Set the intended `VERSION` if changing it, commit all release files, and push. For the current version:
 
 ```bash
-git tag -a v2.3.0 -m "mbmerge 2.3.0"
-git push origin v2.3.0
+git tag -a v2.3.1 -m "mbmerge 2.3.1"
+git push origin v2.3.1
 ```
 
 4. On GitHub create and **publish** a Release for that existing tag. Use **Set as a pre-release** only for previews; those are skipped by production publishing. Write release notes describing changes and compatibility. The release workflow re-runs validation, requires the tag and built version to match, and uploads the wheel/sdist to PyPI after environment approval.
@@ -94,7 +94,7 @@ python -m pip install '.[release]'
 python -m unittest discover -s tests -v
 python -m build
 python -m twine check --strict dist/*
-python tools/check_release.py --dist-dir dist --tag v2.3.0
+python tools/check_release.py --dist-dir dist --tag v2.3.1
 python -m pip install --force-reinstall --no-deps dist/*.whl
 python -I tools/smoke_installed.py
 ```

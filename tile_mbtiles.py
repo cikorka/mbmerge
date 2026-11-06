@@ -366,6 +366,12 @@ def tile_rows_worker(jobs, results, cfg):
         bands = ds.RasterCount
         cut_ds = ogr.Open(cfg["cut"]) if cfg["cut"] else None
         layer = cut_ds.GetLayer("cutline") if cut_ds else None
+        cut_geom = None
+        if layer is not None:  # one geometry: rows of tiles it does not touch are not read at all
+            cut_geom = ogr.Geometry(ogr.wkbMultiPolygon)
+            for feature in layer:
+                cut_geom = cut_geom.Union(feature.GetGeometryRef())
+            layer.ResetReading()
         mem = gdal.GetDriverByName("MEM")
         ts, res, (ox, oy) = cfg["tile_size"], cfg["res"], cfg["origin"]
         px0, py0, width, height = cfg["px0"], cfg["py0"], cfg["width"], cfg["height"]
@@ -384,6 +390,13 @@ def tile_rows_worker(jobs, results, cfg):
             ry0, ry1 = max(0, y), min(height, y + ts)
             if rx1 <= rx0 or ry1 <= ry0:
                 return canvas
+            if cut_geom is not None:
+                minx, maxy = ox + rx0 * res, oy - ry0 * res
+                row_box = ogr.CreateGeometryFromWkt(
+                    f"POLYGON(({minx} {maxy},{ox + rx1 * res} {maxy},{ox + rx1 * res} {oy - ry1 * res},"
+                    f"{minx} {oy - ry1 * res},{minx} {maxy}))")
+                if not cut_geom.Intersects(row_box):
+                    return canvas  # fully outside the cutline: transparent without decoding the sources
             view = canvas[ry0 - y:ry1 - y, rx0 - x:rx1 - x]
             # Exceptions off for the read itself: a sheet with a broken EXIF block reports an
             # error when the mosaic opens it, yet its pixels read fine. A real failure returns None.

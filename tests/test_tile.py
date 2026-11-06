@@ -324,6 +324,37 @@ class TileTests(unittest.TestCase):
         self.assertEqual(a, 255)
         self.assertLess(abs(r - 10) + abs(g - 60) + abs(b - 200), 12)  # the broken sheet's own colour
 
+    def test_rows_outside_the_cutline_are_not_read(self):
+        """Rows of tiles the cutline does not touch are never decoded: the middle sheet here is unreadable and
+        lies between two parts of one cutline (inside its extent), yet the run succeeds."""
+        ulx, uly = -WORLD / 2 + COL * TS * RES, WORLD / 2 - ROW * TS * RES
+        sheets = []
+        for i, color in enumerate(((200, 60, 10), (90, 90, 90), (10, 60, 200))):  # 128 px tall each, stacked
+            png = self.root / f"s{i}.png"
+            Image.new("RGB", (256, 128), color).save(png)
+            if i == 1:
+                data = png.read_bytes()
+                png.write_bytes(data[:len(data) // 2])  # header intact, pixel data cut off: reading it fails
+            (self.root / f"s{i}.pgw").write_text(
+                f"{RES!r}\n0\n0\n{-RES!r}\n{ulx + RES / 2!r}\n{uly - i * 128 * RES - RES / 2!r}\n")
+            sheets.append(png)
+
+        def box(y0, y1):  # pixel rows y0..y1 from the top, full width
+            top, bottom, x1 = uly - y0 * RES, uly - y1 * RES, ulx + 256 * RES
+            return {"type": "Feature", "properties": {}, "geometry": {
+                "type": "Polygon", "coordinates": [[[ulx, top], [x1, top], [x1, bottom], [ulx, bottom], [ulx, top]]]}}
+        # first tile row of the top sheet and last of the bottom one; one tile of margin to the middle sheet,
+        # because the warp kernel may read a line beyond the polygon
+        cut = self.root / "two.geojson"
+        cut.write_text(json.dumps({"type": "FeatureCollection",
+                                   "crs": {"type": "name", "properties": {"name": "EPSG:3857"}},
+                                   "features": [box(0, 64), box(320, 384)]}))
+        out, _ = self.tile(*sheets, extra=["--s-srs", "EPSG:3857", "--cutline", cut])
+        tiles = all_tiles(out)
+        self.assertEqual(set(tiles), {tms(COL + i, ROW + j) for i in range(4) for j in (0, 5)})
+        self.assertEqual(self.pixel(tiles, COL + 1, ROW, 10, 10), (200, 60, 10, 255))
+        self.assertEqual(self.pixel(tiles, COL + 1, ROW + 5, 10, 10), (10, 60, 200, 255))
+
     def test_existing_output_needs_overwrite_and_errors_are_reported(self):
         out = self.root / "exists.mbtiles"
         out.write_bytes(b"keep")
