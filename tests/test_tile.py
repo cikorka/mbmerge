@@ -355,9 +355,13 @@ class TileTests(unittest.TestCase):
             out = io.BytesIO()
             rgba(data).save(out, "WEBP", quality=60, method=4)
             self.assertEqual(lossy_tiles[key], out.getvalue(), key)
-        with sqlite3.connect(lossy) as db:
-            tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        db = sqlite3.connect(lossy)
+        tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        free = db.execute("PRAGMA freelist_count").fetchone()[0]
+        db.close()
         self.assertEqual(tables, {"metadata", "tiles"})
+        self.assertLessEqual(free, 4)  # only the dropped resume-state tables; the lossless source never lived here
+        self.assertEqual(sorted(p.name for p in self.root.iterdir() if p.name.startswith("lossy")), ["lossy.mbtiles"])
 
 
 if __name__ == "__main__":

@@ -495,7 +495,7 @@ def write_base(db, vrt, cut, layout, args, plan, done):
                 continue
             tiles, source = payload
             db.executemany("INSERT OR REPLACE INTO tiles VALUES(?,?,?,?)", tiles)
-            db.executemany("INSERT OR REPLACE INTO _mbmerge_tile_src VALUES(?,?,?,?)", source)
+            db.executemany("INSERT OR REPLACE INTO src.tiles VALUES(?,?,?,?)", source)
             db.commit()
             stats["tiles"] += len(tiles) - counts["overview_tiles"]
             for key, value in counts.items():
@@ -557,7 +557,7 @@ def write_overviews(db, zoom, min_zoom, args, done_levels=()):
             parents = db.execute("SELECT DISTINCT tile_column / 2, tile_row / 2 FROM tiles WHERE zoom_level = ?",
                                  (z + 1,)).fetchall()
             # lossy output: children come from the lossless copies, so no level is built from decoded lossy tiles
-            table = "_mbmerge_tile_src" if args.quality is not None else "tiles"
+            table = "src.tiles" if args.quality is not None else "tiles"
             pending, rows = deque(), []
 
             def drain(limit):
@@ -565,7 +565,7 @@ def write_overviews(db, zoom, min_zoom, args, done_levels=()):
                     rows.append(pending.popleft().result())
                 if len(rows) >= OVERVIEW_COMMIT or (limit == 0 and rows):
                     db.executemany("INSERT OR REPLACE INTO tiles VALUES(?,?,?,?)", [r[:4] for r in rows])
-                    db.executemany("INSERT OR REPLACE INTO _mbmerge_tile_src VALUES(?,?,?,?)",
+                    db.executemany("INSERT OR REPLACE INTO src.tiles VALUES(?,?,?,?)",
                                    [r[:3] + (r[4],) for r in rows if r[4] is not None])
                     db.commit()
                     rows.clear()
@@ -591,7 +591,23 @@ def wgs84_bounds(path, args):
     return min(xs), min(ys), max(xs), max(ys)
 
 
-STATE_TABLES = ("_mbmerge_tile_state", "_mbmerge_tile_done", "_mbmerge_tile_src")
+STATE_TABLES = ("_mbmerge_tile_state", "_mbmerge_tile_done")
+# Lossless copies of the lowest worker level (lossy output only) live in a side file next to the
+# .tmp, attached as `src`: dropping them from the output itself would leave its size in free pages.
+TILES_DDL = """CREATE TABLE IF NOT EXISTS {0}tiles(zoom_level INTEGER NOT NULL, tile_column INTEGER NOT NULL,
+  tile_row INTEGER NOT NULL, tile_data BLOB NOT NULL);
+CREATE UNIQUE INDEX IF NOT EXISTS {0}tile_index ON tiles(zoom_level, tile_column, tile_row);"""
+
+
+def source_path(tmp):
+    return tmp.with_name(tmp.name + "-src")
+
+
+def attach_source(db, tmp):
+    db.execute("ATTACH DATABASE ? AS src", (str(source_path(tmp)),))
+    db.execute("PRAGMA src.journal_mode=WAL")
+    db.execute("PRAGMA src.synchronous=NORMAL")
+    db.executescript(TILES_DDL.format("src."))
 
 
 def open_output(tmp, layout, args, settings, inputs, max_depth):
@@ -618,7 +634,7 @@ def open_output(tmp, layout, args, settings, inputs, max_depth):
         log(args, "resume", rectangles_done=len(done), rectangles=len(rectangles), overview_levels_done=len(levels))
         return db, (depth, [tuple(r) for r in rectangles], total), done, levels
     tmp.unlink(missing_ok=True)
-    for suffix in ("-wal", "-shm"):
+    for suffix in ("-wal", "-shm", "-src", "-src-wal", "-src-shm"):
         Path(f"{tmp}{suffix}").unlink(missing_ok=True)
     plan = plan_base(layout, args.threads, max_depth)
     db = sqlite3.connect(tmp)
@@ -629,10 +645,7 @@ def open_output(tmp, layout, args, settings, inputs, max_depth):
           tile_row INTEGER NOT NULL, tile_data BLOB NOT NULL);
         CREATE UNIQUE INDEX tile_index ON tiles(zoom_level, tile_column, tile_row);
         CREATE TABLE _mbmerge_tile_state(name TEXT PRIMARY KEY, value TEXT NOT NULL);
-        CREATE TABLE _mbmerge_tile_done(c0 INTEGER, c1 INTEGER, r0 INTEGER, r1 INTEGER);
-        CREATE TABLE _mbmerge_tile_src(zoom_level INTEGER NOT NULL, tile_column INTEGER NOT NULL,
-          tile_row INTEGER NOT NULL, tile_data BLOB NOT NULL);
-        CREATE UNIQUE INDEX tile_src_index ON _mbmerge_tile_src(zoom_level, tile_column, tile_row);""")
+        CREATE TABLE _mbmerge_tile_done(c0 INTEGER, c1 INTEGER, r0 INTEGER, r1 INTEGER);""")
     db.executemany("INSERT INTO _mbmerge_tile_state VALUES(?,?)",
                    [("contract", contract), ("plan", json.dumps(plan))])
     db.commit()
@@ -652,11 +665,13 @@ def write_mbtiles(output, vrt, cut, zoom, min_zoom, args, settings, inputs=()):
     try:
         db.execute("PRAGMA journal_mode=WAL")
         db.execute("PRAGMA synchronous=NORMAL")
+        attach_source(db, tmp)
         stats = write_base(db, vrt, cut, layout, args, plan, done)
         depth = plan[0]
         if not db.execute("SELECT 1 FROM tiles WHERE zoom_level = ? LIMIT 1", (zoom,)).fetchone():
             db.close()
-            tmp.unlink(missing_ok=True)
+            for suffix in ("", "-wal", "-shm", "-src", "-src-wal", "-src-shm"):
+                Path(f"{tmp}{suffix}").unlink(missing_ok=True)
             raise TileError("No nonempty tiles: the input is fully transparent after nodata/cutline handling")
         if min_zoom < zoom - depth:
             stats["overview_tiles"] += write_overviews(db, zoom - depth, min_zoom, args, levels)
@@ -673,9 +688,9 @@ def write_mbtiles(output, vrt, cut, zoom, min_zoom, args, settings, inputs=()):
         for table in STATE_TABLES:
             db.execute(f"DROP TABLE {table}")
         db.commit()
+        db.execute("DETACH DATABASE src")
         db.execute("PRAGMA journal_mode=DELETE")  # one self-contained file, no -wal/-shm next to it
-        # no VACUUM: it would rewrite a country-sized file; the dropped pyramid source and rows replaced
-        # on resume leave free pages of the order of 1 % (one tile in 4**PYRAMID_DEPTH)
+        # no VACUUM: it would rewrite a country-sized file; only rows replaced on resume leave free pages
     except BaseException:
         try:
             db.close()
@@ -686,6 +701,8 @@ def write_mbtiles(output, vrt, cut, zoom, min_zoom, args, settings, inputs=()):
         raise
     db.close()
     os.replace(tmp, output)
+    for suffix in ("-src", "-src-wal", "-src-shm"):
+        Path(f"{tmp}{suffix}").unlink(missing_ok=True)
     return stats
 
 
