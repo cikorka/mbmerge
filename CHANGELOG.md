@@ -2,7 +2,7 @@
 
 **English** | [Čeština](CHANGELOG.cs.md)
 
-## 2.4.0 — unreleased
+## 2.4.0 — 2026-11-07
 
 - `tile --resume`: progress (`rows_done` in `tiling` and the final `base` event, which now carries `rows_done`/`rows`) counts the rows finished before the interruption, so it is the progress of the whole output, not of the current run.
 - `mbmerge grade` measures one colour grade (levels per channel, gamma, saturation, vibrance) for a whole mosaic from all inputs read at 1/8 (99 orthophoto sheets: 13 s on 12 threads); `--preview` renders before/after crops. `tile --grade` applies it to every pixel before encoding — one function everywhere, so no seams between sheets — and records it in the metadata and the resume contract; `compare --grade` grades the reference too. Graded orthophoto at q85: tiles about 45 % larger.

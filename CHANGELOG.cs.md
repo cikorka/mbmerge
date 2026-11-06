@@ -2,7 +2,7 @@
 
 [English](CHANGELOG.md) | **Čeština**
 
-## 2.4.0 — nevydáno
+## 2.4.0 — 2026-11-07
 
 - `tile --resume`: postup (`rows_done` v událostech `tiling` a v závěrečné `base`, která nově nese `rows_done`/`rows`) započítá řádky hotové před přerušením, takže ukazuje postup celého výstupu, ne jen aktuálního běhu.
 - `mbmerge grade` změří jednu barevnou úpravu (úrovně po kanálech, gamma, sytost, vibrance) pro celou mozaiku ze všech vstupů čtených v 1/8 (99 listů ortofota: 13 s na 12 vláknech); `--preview` vyrobí výřezy před/po. `tile --grade` ji použije na každý pixel před kódováním — jedna funkce všude, takže bez švů mezi listy — a zapíše ji do metadat i kontraktu navázání; `compare --grade` upraví i referenci. Upravené ortofoto při q85: dlaždice asi o 45 % větší.
