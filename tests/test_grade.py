@@ -20,6 +20,7 @@ BASE = {"version": 1, "black": [10, 20, 30], "white": [240, 230, 220], "gamma": 
         "vibrance": 0.4}
 
 
+@unittest.skipUnless(__import__("importlib").util.find_spec("numpy"), "numpy not installed (needed by grade, like tile)")
 class GradeFunctionTests(unittest.TestCase):
     def test_levels_map_black_and_white_points_and_clip_outside(self):
         table = lut({**BASE, "gamma": 1.0})
