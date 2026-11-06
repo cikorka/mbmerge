@@ -134,6 +134,47 @@ def collect(args):
     return files
 
 
+def plain_mosaic(files, work, args):
+    """Mosaic of inputs that need nothing but a coordinate system, or None.
+
+    A national orthophoto is ~16 000 JPEG sheets with world files: preparing them one by
+    one (two GDAL processes each) took 38 minutes. When no input is a PDF, none has a
+    palette and no --collar/--nodata is asked, the headers are read in-process and the
+    SRS is given once to the whole mosaic; any other case takes the per-input path.
+    """
+    if len(files) < 2 or args.collar or args.nodata or any(Path(f).suffix.lower() == ".pdf" for f in files):
+        return None
+    from osgeo import gdal
+    with_srs = without_srs = 0
+    # Exceptions off while reading headers: a broken EXIF block (seen in a few national
+    # orthophoto sheets) is reported as an error although the image reads fine.
+    with gdal.ExceptionMgr(useExceptions=False):
+        for f in files:
+            ds = gdal.Open(str(f))
+            if ds is None:
+                raise TileError(f"Cannot open {f}: {gdal.GetLastErrorMsg()}")
+            if ds.RasterCount and ds.GetRasterBand(1).GetColorTable() is not None:
+                return None
+            if ds.GetProjectionRef():
+                with_srs += 1
+            else:
+                without_srs += 1
+            ds = None
+    if with_srs and without_srs:
+        return None  # mixed: per input, so a declared SRS is never overridden
+    if without_srs and not args.s_srs:
+        raise TileError(f"{Path(files[0]).name} has no coordinate system (a world file alone does not define one); "
+                        "pass --s-srs, e.g. --s-srs EPSG:5514")
+    listing = work / "inputs.txt"
+    listing.write_text("".join(f"{f}\n" for f in files), encoding="utf-8")
+    src = work / "mosaic.vrt"
+    cmd = ["gdalbuildvrt", "-q", "-addalpha", "-resolution", "highest", "-input_file_list", listing]
+    if without_srs:
+        cmd += ["-a_srs", args.s_srs]
+    run(cmd + [src], args)
+    return src
+
+
 def prepare_input(index, path, work, args):
     """Make one input ready for mosaicking: rasterized, georeferenced, RGB(A), collars/colors -> alpha."""
     src = path
@@ -344,7 +385,12 @@ def tile_rows_worker(jobs, results, cfg):
             if rx1 <= rx0 or ry1 <= ry0:
                 return canvas
             view = canvas[ry0 - y:ry1 - y, rx0 - x:rx1 - x]
-            data = ds.ReadAsArray(rx0, ry0, rx1 - rx0, ry1 - ry0)
+            # Exceptions off for the read itself: a sheet with a broken EXIF block reports an
+            # error when the mosaic opens it, yet its pixels read fine. A real failure returns None.
+            with gdal.ExceptionMgr(useExceptions=False):
+                data = ds.ReadAsArray(rx0, ry0, rx1 - rx0, ry1 - ry0)
+                if data is None:
+                    raise RuntimeError(f"Reading the warp failed: {gdal.GetLastErrorMsg()}")
             if bands == 2:  # gray + alpha
                 view[..., :3] = data[0][..., None]
                 view[..., 3] = data[1]
@@ -725,12 +771,14 @@ def tile(args):
     files = collect(args)
     with tempfile.TemporaryDirectory(prefix="mbmerge-tile-", dir=args.work_dir) as tmp:
         work = Path(tmp)
-        prepared = [prepare_input(i, p, work, args) for i, p in enumerate(files)]
-        if len(prepared) == 1:
-            src = prepared[0]
-        else:
-            src = work / "mosaic.vrt"
-            run(["gdalbuildvrt", "-q", "-addalpha", src, *prepared], args)
+        src = plain_mosaic(files, work, args)
+        if src is None:
+            prepared = [prepare_input(i, p, work, args) for i, p in enumerate(files)]
+            if len(prepared) == 1:
+                src = prepared[0]
+            else:
+                src = work / "mosaic.vrt"
+                run(["gdalbuildvrt", "-q", "-addalpha", "-resolution", "highest", src, *prepared], args)
         native = native_resolution(src, work, args)
         zoom = args.zoom if args.zoom is not None else tile_zoom(native, args.tile_size)
         min_zoom = zoom if args.min_zoom is None else args.min_zoom

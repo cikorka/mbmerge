@@ -8,6 +8,8 @@
 - `tile --cutline` limits the warp to the intersection of the polygon with the input. A country boundary over one orthophoto sheet used to walk the empty rows of the whole country (estimated 27 h instead of 30 min).
 - `tile --quality` builds every level below the workers' in-memory levels from lossless copies kept in a side file, never from decoded lossy tiles (z13 of an orthophoto: +0.7 dB PSNR).
 - `tile --worker-cache-mib` (default 128, before a fixed 256): about 30 % less memory per worker at the same speed, so 32 workers fit in 16 GB. Orthophoto of 99 sheets to z19: 16 workers 1187 s, 32 workers 637 s.
+- `tile` reads the headers of plain inputs in-process and gives `--s-srs` once to the whole mosaic when every input needs only that (no PDF, palette, `--collar`, `--nodata`): preparing 16 316 orthophoto sheets took 13 s instead of 38 min. Mosaics take the finest input resolution (`-resolution highest`), not the average. A JPEG with a broken EXIF block (reported as an error, pixels fine) no longer stops the header check or the workers; a read that returns no data still does.
+- `mbmerge compare` scores MBTiles against a direct render of their sources (PSNR, 5th percentile, SSIM per zoom; needs scikit-image). `tools/benchmark_tile_workers.py` measures worker memory and speed in a fixed window.
 
 ## 2.2.0 — unreleased
 

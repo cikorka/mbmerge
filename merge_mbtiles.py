@@ -1329,6 +1329,8 @@ def parser():
     # Imported here: tile_mbtiles reuses helpers from this module.
     from tile_mbtiles import add_parser as add_tile_parser
     add_tile_parser(sub, positive)
+    from compare_mbtiles import add_parser as add_compare_parser
+    add_compare_parser(sub)
     return p
 
 

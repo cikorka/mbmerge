@@ -278,6 +278,52 @@ class TileTests(unittest.TestCase):
         out, _ = self.tile(jpg, extra=["--s-srs", "EPSG:3857"])
         self.assertEqual({k for k in all_tiles(out)}, {tms(COL + i, ROW + j) for i in range(2) for j in range(2)})
 
+    def test_sheets_with_world_files_form_one_mosaic_with_the_given_srs(self):
+        """Many sheets needing only --s-srs take the in-process path; a declared SRS is never overridden."""
+        ulx, uly = -WORLD / 2 + COL * TS * RES, WORLD / 2 - ROW * TS * RES
+        sheets = []
+        for i, color in enumerate(((200, 60, 10), (10, 60, 200))):
+            png = self.root / f"sheet{i}.png"
+            Image.new("RGB", (128, 128), color).save(png)
+            x0 = ulx + i * 128 * RES  # side by side
+            (self.root / f"sheet{i}.pgw").write_text(f"{RES!r}\n0\n0\n{-RES!r}\n{x0 + RES / 2!r}\n{uly - RES / 2!r}\n")
+            sheets.append(png)
+        _, proc = self.tile(*sheets, check=False)
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("--s-srs", proc.stderr)
+        out, proc = self.tile(*sheets, extra=["--s-srs", "EPSG:3857"])
+        self.assertNotIn("gdal_translate", proc.stderr)  # no per-sheet process
+        tiles = all_tiles(out)
+        self.assertEqual(set(tiles), {tms(COL + i, ROW + j) for i in range(4) for j in range(2)})
+        self.assertEqual(self.pixel(tiles, COL, ROW, 5, 5), (200, 60, 10, 255))
+        self.assertEqual(self.pixel(tiles, COL + 3, ROW + 1, 60, 60), (10, 60, 200, 255))
+        declared = self.geotiff(Image.new("RGB", (128, 128), (0, 200, 0)), name="declared.tif")
+        mixed, _ = self.tile(sheets[0], declared, output=self.root / "mixed.mbtiles", extra=["--s-srs", "EPSG:3857"])
+        self.assertEqual(self.pixel(all_tiles(mixed), COL, ROW, 5, 5), (0, 200, 0, 255))  # later input on top
+
+    def test_jpeg_with_broken_exif_still_tiles(self):
+        """Some national orthophoto sheets carry an EXIF block pointing past the file: GDAL reports an error,
+        yet the pixels read fine. Neither the header check nor the workers may fail on it."""
+        import struct
+        ulx, uly = -WORLD / 2 + COL * TS * RES, WORLD / 2 - ROW * TS * RES
+        sheets = []
+        for i, color in enumerate(((200, 60, 10), (10, 60, 200))):
+            buf = __import__("io").BytesIO()
+            Image.new("RGB", (128, 128), color).save(buf, "JPEG", quality=100)
+            data = buf.getvalue()
+            if i == 1:
+                exif = b"Exif\x00\x00II*\x00" + struct.pack("<I", 375008158)
+                data = data[:2] + b"\xff\xe1" + struct.pack(">H", len(exif) + 2) + exif + data[2:]
+            jpg = self.root / f"exif{i}.jpg"
+            jpg.write_bytes(data)
+            (self.root / f"exif{i}.jgw").write_text(
+                f"{RES!r}\n0\n0\n{-RES!r}\n{ulx + i * 128 * RES + RES / 2!r}\n{uly - RES / 2!r}\n")
+            sheets.append(jpg)
+        out, _ = self.tile(*sheets, extra=["--s-srs", "EPSG:3857"])
+        r, g, b, a = self.pixel(all_tiles(out), COL + 3, ROW + 1, 60, 60)
+        self.assertEqual(a, 255)
+        self.assertLess(abs(r - 10) + abs(g - 60) + abs(b - 200), 12)  # the broken sheet's own colour
+
     def test_existing_output_needs_overwrite_and_errors_are_reported(self):
         out = self.root / "exists.mbtiles"
         out.write_bytes(b"keep")
@@ -362,6 +408,25 @@ class TileTests(unittest.TestCase):
         self.assertEqual(tables, {"metadata", "tiles"})
         self.assertLessEqual(free, 4)  # only the dropped resume-state tables; the lossless source never lived here
         self.assertEqual(sorted(p.name for p in self.root.iterdir() if p.name.startswith("lossy")), ["lossy.mbtiles"])
+
+    @unittest.skipUnless(__import__("importlib").util.find_spec("skimage"), "scikit-image not installed")
+    def test_compare_scores_lossless_above_lossy_against_the_source(self):
+        """Lossless tiles of an aligned raster equal the direct render; lossy ones score lower."""
+        import random
+        rnd = random.Random(5)
+        im = Image.new("RGB", (256, 256))
+        im.putdata([(rnd.randrange(256), rnd.randrange(256), rnd.randrange(256)) for _ in range(256 * 256)])
+        src = self.geotiff(im)
+        exact, _ = self.tile(src, output=self.root / "exact.mbtiles")
+        lossy, _ = self.tile(src, output=self.root / "lossy.mbtiles", extra=["--quality", 50])
+        proc = subprocess.run([sys.executable, str(ROOT / "merge_mbtiles.py"), "compare", str(src),
+                               "--candidate", f"exact={exact}", "--candidate", f"lossy={lossy}", "--zoom", str(Z),
+                               "--samples", "16"], capture_output=True, text=True, timeout=120)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        report = json.loads(proc.stdout)
+        self.assertEqual(report["exact"][str(Z)]["scored"], 16)
+        self.assertEqual(report["exact"][str(Z)]["psnr"], 99.0)
+        self.assertLess(report["lossy"][str(Z)]["psnr"], 40)
 
 
 if __name__ == "__main__":

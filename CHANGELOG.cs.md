@@ -8,6 +8,8 @@
 - `tile --cutline` omezí warp na průnik polygonu se vstupem. Hranice republiky nad jedním listem ortofota dřív procházela prázdné řádky celé země (odhad 27 h místo 30 min).
 - `tile --quality` staví všechny úrovně pod úrovněmi procesů z bezztrátových kopií v pomocném souboru, nikdy z dekódovaných ztrátových dlaždic (z13 ortofota: +0,7 dB PSNR).
 - `tile --worker-cache-mib` (výchozí 128, dřív pevně 256): asi o 30 % méně paměti na proces při stejné rychlosti, 32 procesů se vejde do 16 GB. Ortofoto z 99 listů do z19: 16 procesů 1187 s, 32 procesů 637 s.
+- `tile` čte hlavičky prostých vstupů přímo v procesu a `--s-srs` dá jednou celé mozaice, když ho všechny vstupy potřebují jako jediné (bez PDF, palety, `--collar`, `--nodata`): příprava 16 316 listů ortofota trvala 13 s místo 38 min. Mozaika bere nejjemnější rozlišení vstupů (`-resolution highest`), ne průměr. JPEG s poškozeným blokem EXIF (GDAL hlásí chybu, pixely jsou v pořádku) už nezastaví kontrolu hlaviček ani pracovní procesy; čtení, které nevrátí data, ano.
+- `mbmerge compare` porovná MBTiles s přímým renderem zdrojů (PSNR, 5. percentil, SSIM po zoomech; potřebuje scikit-image). `tools/benchmark_tile_workers.py` měří paměť a rychlost pracovních procesů v pevném okně.
 
 ## 2.2.0 — nevydáno
 
