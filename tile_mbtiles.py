@@ -65,7 +65,11 @@ MIN_JOBS_PER_WORKER = 2  # below this the in-memory pyramid depth is lowered (se
 # Levels below the base built by the tile workers from pixels in memory (one
 # pending row per level); lower ones from the stored tiles of the level above.
 PYRAMID_DEPTH = 4
-WORKER_CACHE_MIB = 256  # GDAL block cache per worker
+# GDAL block cache per worker (--worker-cache-mib). Baseline JPEG sheets are decoded in full scanlines
+# and cannot seek back, so the cache must hold the source lines one tile row spans, rotation included
+# (EPSG:5514 -> 3857 at z19: up to ~95 MiB per sheet). Measured on 0.125 m orthophoto: 128 MiB as fast
+# as 256 at 70 % of the worker memory; 64 MiB re-decodes and is 3x slower.
+WORKER_CACHE_MIB = 128
 QUALITY_RANGE = range(1, 101)
 OVERVIEW_INFLIGHT = 8  # overview jobs per worker submitted ahead of the writer
 OVERVIEW_COMMIT = 512  # overview tiles per transaction
@@ -316,7 +320,7 @@ def tile_rows_worker(jobs, results, cfg):
 
         signal.signal(signal.SIGINT, signal.SIG_IGN)  # the parent stops workers
         gdal.UseExceptions()
-        gdal.SetCacheMax(WORKER_CACHE_MIB * 1024 * 1024)
+        gdal.SetCacheMax(cfg["worker_cache_mib"] * 1024 * 1024)
         ds = gdal.Open(cfg["vrt"])
         bands = ds.RasterCount
         cut_ds = ogr.Open(cfg["cut"]) if cfg["cut"] else None
@@ -469,7 +473,7 @@ def write_base(db, vrt, cut, layout, args, plan, done):
         jobs.put(None)
     cfg = {**layout, **encoding(args), "vrt": str(vrt), "cut": str(cut) if cut else None, "depth": depth,
            "binary_alpha": args.binary_alpha, "keep_empty": args.keep_empty,
-           "inside": TileRange(layout)}
+           "inside": TileRange(layout), "worker_cache_mib": args.worker_cache_mib}
     procs = [ctx.Process(target=tile_rows_worker, args=(jobs, results, cfg), daemon=True) for _ in range(workers)]
     done_rows, start, last_log = 0, time.monotonic(), time.monotonic()
     for p in procs:
@@ -791,6 +795,8 @@ def add_parser(sub, positive):
     t.add_argument("--page-size", type=int, choices=(1024, 2048, 4096, 8192, 16384, 32768, 65536), default=4096)
     t.add_argument("--threads", type=positive, default=min(8, os.cpu_count() or 1),
                    help="worker processes (each reads and encodes its own rows of tiles)")
+    t.add_argument("--worker-cache-mib", type=positive, default=WORKER_CACHE_MIB,
+                   help=f"GDAL block cache of each worker in MiB (default {WORKER_CACHE_MIB})")
     t.add_argument("--work-dir", help="directory for temporary files: rasterized PDFs, collar masks, VRTs "
                                       "(default: system temp)")
     t.add_argument("--name")

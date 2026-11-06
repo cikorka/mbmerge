@@ -2,6 +2,13 @@
 
 [English](CHANGELOG.md) | **Čeština**
 
+## 2.3.0 — nevydáno
+
+- `tile --resume` pokračuje v `<výstup>.tmp`, který zůstal po chybě či zabití procesu (commit po každé řadě dlaždic, WAL). Hotové pracovní obdélníky a úrovně pyramidy přeskočí; vstupy (cesta, velikost, mtime) a nastavení musí být stejné, `--threads` se smí lišit. Změřeno na ortofotu zabitém po 10 minutách: navázaný výstup je bajtově shodný s nepřerušeným během.
+- `tile --cutline` omezí warp na průnik polygonu se vstupem. Hranice republiky nad jedním listem ortofota dřív procházela prázdné řádky celé země (odhad 27 h místo 30 min).
+- `tile --quality` staví všechny úrovně pod úrovněmi procesů z bezztrátových kopií v pomocném souboru, nikdy z dekódovaných ztrátových dlaždic (z13 ortofota: +0,7 dB PSNR).
+- `tile --worker-cache-mib` (výchozí 128, dřív pevně 256): asi o 30 % méně paměti na proces při stejné rychlosti, 32 procesů se vejde do 16 GB. Ortofoto z 99 listů do z19: 16 procesů 1187 s, 32 procesů 637 s.
+
 ## 2.2.0 — nevydáno
 
 - `tile` staví první čtyři úrovně pod základem (`PYRAMID_DEPTH`) přímo v pracovních procesech, z pixelů, které právě zakódovaly, místo dekódování uložených dlaždic: pracovní obdélníky jsou zarovnané na bloky 16 × 16 dlaždic a pro každou úroveň se drží jedna rozpracovaná řada (asi 30 MB na proces). Bezztrátové výstupy jsou pixelově shodné s 2.1.0 na všech zoomech. S `--quality 85` jsou z18–z15 asi o 1 dB blíž bezztrátové pyramidě (bez opakované ztrátové komprese) a ortofoto z 12 listů spotřebovalo asi o 9 % méně času procesoru. Malé rastry s méně obdélníky, než je procesů, použijí menší hloubku, aby dál pracovaly všechny procesy.

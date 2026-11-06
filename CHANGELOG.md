@@ -2,6 +2,13 @@
 
 **English** | [Čeština](CHANGELOG.cs.md)
 
+## 2.3.0 — unreleased
+
+- `tile --resume` continues `<output>.tmp` left by a failed or killed run (committed after every row of tiles, WAL). Finished work rectangles and overview levels are skipped; inputs (path, size, mtime) and settings must be unchanged, `--threads` may differ. Measured on an orthophoto killed after 10 minutes: the resumed output is byte-identical to an uninterrupted run.
+- `tile --cutline` limits the warp to the intersection of the polygon with the input. A country boundary over one orthophoto sheet used to walk the empty rows of the whole country (estimated 27 h instead of 30 min).
+- `tile --quality` builds every level below the workers' in-memory levels from lossless copies kept in a side file, never from decoded lossy tiles (z13 of an orthophoto: +0.7 dB PSNR).
+- `tile --worker-cache-mib` (default 128, before a fixed 256): about 30 % less memory per worker at the same speed, so 32 workers fit in 16 GB. Orthophoto of 99 sheets to z19: 16 workers 1187 s, 32 workers 637 s.
+
 ## 2.2.0 — unreleased
 
 - `tile` builds the first four levels below the base (`PYRAMID_DEPTH`) in the worker processes, from the pixels they have just encoded, instead of decoding stored tiles: work rectangles are aligned to blocks of 16 × 16 tiles and one pending row per level is kept (about 30 MB per worker). Lossless outputs are pixel-identical to 2.1.0 at every zoom. With `--quality 85`, z18–z15 are about 1 dB closer to the lossless pyramid (no repeated lossy round trip), and an orthophoto of 12 sheets took about 9 % less CPU time. Small rasters with fewer rectangles than workers use a shallower depth, so they keep using every worker.
