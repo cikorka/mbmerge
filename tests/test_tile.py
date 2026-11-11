@@ -301,6 +301,32 @@ class TileTests(unittest.TestCase):
         mixed, _ = self.tile(sheets[0], declared, output=self.root / "mixed.mbtiles", extra=["--s-srs", "EPSG:3857"])
         self.assertEqual(self.pixel(all_tiles(mixed), COL, ROW, 5, 5), (0, 200, 0, 255))  # later input on top
 
+    def test_coarse_zoom_reads_inputs_through_their_overviews_in_place(self):
+        """Sheets of two resolutions get no implicit VRT overviews; a zoom 8x coarser is read through each
+        JPEG's own overviews (read_factor) and every sheet stays where it belongs."""
+        ulx, uly = -WORLD / 2 + COL * TS * RES, WORLD / 2 - ROW * TS * RES
+        fine = RES / 8  # 1024 px per sheet: JPEG overviews 1/2 .. 1/8
+        sheets = []
+        for i, (size, res) in enumerate(((1024, fine), (512, fine * 2))):  # same extent, different resolution
+            im = Image.new("RGB", (size, size))
+            half = size // 2
+            for k, color in enumerate(((220, 30, 30), (30, 220, 30), (30, 30, 220), (220, 220, 30))):
+                im.paste(color, ((k % 2) * half, (k // 2) * half, (k % 2 + 1) * half, (k // 2 + 1) * half))
+            jpg = self.root / f"sheet{i}.jpg"
+            im.save(jpg, quality=95)
+            x0 = ulx + i * 1024 * fine
+            (self.root / f"sheet{i}.jgw").write_text(f"{res!r}\n0\n0\n{-res!r}\n{x0 + res / 2!r}\n{uly - res / 2!r}\n")
+            sheets.append(jpg)
+        out, _ = self.tile(*sheets, extra=["--s-srs", "EPSG:3857"])  # base zoom Z: 8x coarser than the sheets
+        meta = dict(sqlite3.connect(out).execute("SELECT name, value FROM metadata"))
+        self.assertEqual(json.loads(meta["mbmerge:tile"])["read_factor"], 8)
+        tiles = all_tiles(out)
+        for i in range(2):  # each sheet is 128 px at Z (two tiles of TS = 64): quadrant centres
+            for k, color in enumerate(((220, 30, 30), (30, 220, 30), (30, 30, 220), (220, 220, 30))):
+                x, y = i * 128 + (k % 2) * 64 + 32, (k // 2) * 64 + 32
+                got = self.pixel(tiles, COL + x // TS, ROW + y // TS, x % TS, y % TS)
+                self.assertLess(sum(abs(a - b) for a, b in zip(got[:3], color)), 20, (i, k, got))
+
     def test_jpeg_with_broken_exif_still_tiles(self):
         """Some national orthophoto sheets carry an EXIF block pointing past the file: GDAL reports an error,
         yet the pixels read fine. Neither the header check nor the workers may fail on it."""

@@ -15,6 +15,7 @@ for another year so that years look alike. `--preview` renders before/after crop
 """
 from __future__ import annotations
 
+import argparse
 import json
 import math
 from pathlib import Path
@@ -96,8 +97,9 @@ class Grader:
         return rgba
 
 
-def sheet_histogram(path):
-    """Per-channel histogram of one input at 1/SAMPLE_SCALE without edge collars, or None."""
+def sheet_histogram(path, s_srs=None, balancer=None):
+    """Per-channel and luma histograms of one input at 1/SAMPLE_SCALE without edge collars, or None.
+    With a `balancer` the input is warped to EPSG:3857 (the balancer takes output positions) and levelled first."""
     import numpy as np
     from osgeo import gdal
 
@@ -105,24 +107,51 @@ def sheet_histogram(path):
         ds = gdal.Open(str(path))
         if ds is None or ds.RasterCount < 3:
             return None
-        w, h = max(1, ds.RasterXSize // SAMPLE_SCALE), max(1, ds.RasterYSize // SAMPLE_SCALE)
-        data = ds.ReadAsArray(0, 0, ds.RasterXSize, ds.RasterYSize, buf_xsize=w, buf_ysize=h, band_list=[1, 2, 3])
+        if balancer is None:
+            w, h = max(1, ds.RasterXSize // SAMPLE_SCALE), max(1, ds.RasterYSize // SAMPLE_SCALE)
+            data = ds.ReadAsArray(0, 0, ds.RasterXSize, ds.RasterYSize, buf_xsize=w, buf_ysize=h, band_list=[1, 2, 3])
+            alpha = None
+        else:  # the grid GDAL suggests for the sheet in EPSG:3857 (square pixels), SAMPLE_SCALE times coarser
+            from osgeo import osr
+
+            src = ds.GetSpatialRef()
+            if src is None:
+                src = osr.SpatialReference()
+                src.SetFromUserInput(s_srs)
+            merc = osr.SpatialReference()
+            merc.ImportFromEPSG(3857)
+            suggested = gdal.AutoCreateWarpedVRT(ds, src.ExportToWkt(), merc.ExportToWkt())
+            gt = suggested.GetGeoTransform()
+            minx, maxy = gt[0], gt[3]
+            maxx, miny = minx + gt[1] * suggested.RasterXSize, maxy + gt[5] * suggested.RasterYSize
+            res = gt[1] * SAMPLE_SCALE
+            warped = gdal.Warp("", ds, format="MEM", srcSRS=src.ExportToWkt(), dstSRS="EPSG:3857", xRes=res, yRes=res,
+                               outputBounds=(minx, miny, maxx, maxy), resampleAlg="average", dstAlpha=True,
+                               outputType=gdal.GDT_Byte, srcBands=[1, 2, 3])
+            data = None if warped is None else warped.ReadAsArray()
     if data is None:
         return None
+    if balancer is not None:
+        rgba = np.ascontiguousarray(data.transpose(1, 2, 0))
+        balancer(rgba, minx, maxy, res)
+        data, alpha = rgba[..., :3].transpose(2, 0, 1), rgba[..., 3]
     rgb = data.reshape(3, -1)
     keep = ~(np.all(rgb <= EDGE, axis=0) | np.all(rgb >= 255 - EDGE, axis=0))
-    return np.stack([np.bincount(rgb[c][keep], minlength=256) for c in range(3)])
+    if alpha is not None:
+        keep &= alpha.ravel() == 255
+    luma = np.rint(rgb[:, keep].T @ np.array(LUMA)).astype(np.int64)
+    return np.stack([*(np.bincount(rgb[c][keep], minlength=256) for c in range(3)), np.bincount(luma, minlength=256)])
 
 
-def histogram(files, args):
+def histogram(files, args, balancer=None):
     """Histograms of all inputs summed; (hist[3][256], pixels). GDAL decodes outside the GIL: threads scale."""
     from concurrent.futures import ThreadPoolExecutor
 
     import numpy as np
 
-    hist = np.zeros((3, 256), np.int64)
+    hist = np.zeros((4, 256), np.int64)  # R, G, B, luma
     with ThreadPoolExecutor(max_workers=args.threads) as pool:
-        for h in pool.map(sheet_histogram, files):
+        for h in pool.map(lambda f: sheet_histogram(f, args.s_srs, balancer), files):
             if h is not None:
                 hist += h
     return hist, int(hist[0].sum())
@@ -140,13 +169,21 @@ def measure(args):
     from tile_mbtiles import collect, log
 
     files = collect(args)
-    hist, pixels = histogram(files, args)
+    balancer = None
+    if args.balance:  # levels of the evened-out mosaic, which is what tile --balance --grade grades
+        from balance_mbtiles import Balancer
+
+        balancer = Balancer(args.balance)
+    hist, pixels = histogram(files, args, balancer)
     if not pixels:
         raise GradeError("No image pixels in the sample")
     black = [percentile(hist[c], args.clip / 100) for c in range(3)]
     white = [percentile(hist[c], 1 - args.clip / 100) for c in range(3)]
-    if args.linked_levels:  # one black and white point for all channels: keeps the colour balance as it is
-        black, white = [min(black)] * 3, [max(white)] * 3
+    if args.linked_levels is None:  # balanced inputs have their colour already set by the reference
+        args.linked_levels = bool(args.balance)
+    if args.linked_levels:  # one black and white point for all channels, from the luma: keeps the colour balance
+        black = [percentile(hist[3], args.clip / 100)] * 3
+        white = [percentile(hist[3], 1 - args.clip / 100)] * 3
     white = [max(w, b + 16) for b, w in zip(black, white)]
     gamma = args.gamma
     if gamma == "auto":
@@ -162,7 +199,7 @@ def measure(args):
     grade = {"version": GRADE_VERSION, "black": black, "white": white, "gamma": float(gamma),
              "saturation": args.saturation, "vibrance": args.vibrance,
              "sample": {"inputs": len(files), "pixels": pixels, "scale": f"1/{SAMPLE_SCALE}", "clip_percent": args.clip,
-                        "linked_levels": args.linked_levels}}
+                        "linked_levels": args.linked_levels, "balance": Path(args.balance).name if args.balance else None}}
     validate(grade)
     Path(args.output).write_text(json.dumps(grade, indent=1) + "\n", encoding="utf-8")
     log(args, "grade", output=args.output, **{k: grade[k] for k in ("black", "white", "gamma", "saturation", "vibrance")})
@@ -184,6 +221,11 @@ def preview(args):
     out.mkdir(parents=True, exist_ok=True)
     vrt = str(out / "mosaic.vrt")
     gdal.BuildVRT(vrt, [str(f) for f in files], outputSRS=args.s_srs)
+    balancer = None
+    if args.balance:  # right side: balanced as tile --balance does, then graded
+        from balance_mbtiles import Balancer
+
+        balancer = Balancer(args.balance)
     wgs, merc = osr.SpatialReference(), osr.SpatialReference()
     wgs.ImportFromEPSG(4326)
     merc.ImportFromEPSG(3857)
@@ -195,10 +237,13 @@ def preview(args):
         lon, lat = map(float, at.split(","))
         x, y, _ = to_merc.TransformPoint(lon, lat)
         half = args.size / 2 * res
-        ds = gdal.Warp("", vrt, format="MEM", dstSRS="EPSG:3857", outputBounds=(x - half, y - half, x + half, y + half),
-                       width=args.size, height=args.size, resampleAlg="average", dstAlpha=True)
-        before = np.ascontiguousarray(ds.ReadAsArray().transpose(1, 2, 0))
-        after = grader(before.copy())
+        window = {"format": "MEM", "dstSRS": "EPSG:3857", "outputBounds": (x - half, y - half, x + half, y + half),
+                  "width": args.size, "height": args.size, "resampleAlg": "average", "dstAlpha": True}
+        before = np.ascontiguousarray(gdal.Warp("", vrt, **window).ReadAsArray().transpose(1, 2, 0))
+        after = before.copy()
+        if balancer is not None:
+            balancer(after, x - half, y + half, res)
+        after = grader(after)
         pair = np.concatenate([before[..., :3], np.full((args.size, 8, 3), 255, np.uint8), after[..., :3]], axis=1)
         name = f"preview_{i}.jpg"
         Image.fromarray(pair).save(out / name, quality=92)
@@ -233,8 +278,11 @@ def add_parser(sub):
     g.add_argument("--output", help="grade JSON to write")
     g.add_argument("--clip", type=float, default=0.3,
                    help="percent of the darkest and brightest sampled pixels clipped by the levels (default 0.3)")
-    g.add_argument("--linked-levels", action="store_true",
-                   help="one black/white point for all channels (no white balance correction)")
+    g.add_argument("--linked-levels", action=argparse.BooleanOptionalAction, default=None,
+                   help="one black/white point for all channels (no white balance correction); "
+                        "default: on with --balance, off without")
+    g.add_argument("--balance", metavar="BALANCE_NPZ",
+                   help="measure (and preview) the mosaic as `tile --balance` levels it")
     g.add_argument("--gamma", type=lambda v: v if v == "auto" else float(v), default=1.0,
                    help="gamma after levels; auto = median luma to --target-median (default 1.0)")
     g.add_argument("--target-median", type=float, default=118, help="median luma for --gamma auto (default 118)")

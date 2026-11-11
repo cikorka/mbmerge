@@ -49,6 +49,11 @@ def compare(args):
         from grade_mbtiles import Grader, load
 
         grader = Grader(load(args.grade))
+    balancer = None
+    if args.balance:  # likewise for the balance: it precedes the grade, as in tile
+        from balance_mbtiles import Balancer
+
+        balancer = Balancer(args.balance)
     candidates = {}
     for spec in args.candidate:
         name, sep, path = spec.partition("=")
@@ -60,6 +65,7 @@ def compare(args):
     with tempfile.TemporaryDirectory(prefix="mbmerge-compare-") as tmp:
         vrt = str(Path(tmp) / "src.vrt")
         gdal.BuildVRT(vrt, [str(f) for f in files], outputSRS=args.s_srs)
+
         rng = random.Random(args.seed)
         report = {}
         for z in args.zoom:
@@ -83,8 +89,11 @@ def compare(args):
                 ref = gdal.Warp("", vrt, format="MEM", dstSRS="EPSG:3857", width=ts, height=ts,
                                 outputBounds=(minx, miny, minx + size, miny + size), resampleAlg=args.resampling,
                                 dstAlpha=True).ReadAsArray().transpose(1, 2, 0)
+                ref = np.ascontiguousarray(ref)
+                if balancer is not None:
+                    balancer(ref, minx, miny + size, size / ts)
                 if grader is not None:
-                    ref = grader(np.ascontiguousarray(ref))
+                    ref = grader(ref)
                 mask = ref[..., 3] == 255
                 for t in tiles.values():
                     mask &= t[..., 3] == 255
@@ -122,5 +131,6 @@ def add_parser(sub):
     c.add_argument("--resampling", default="average", help="of the reference render (default average)")
     c.add_argument("--seed", type=int, default=1)
     c.add_argument("--grade", metavar="GRADE_JSON", help="grade the reference like `tile --grade` did")
+    c.add_argument("--balance", metavar="BALANCE_NPZ", help="level the reference like `tile --balance` did")
     c.set_defaults(func=compare, json_log=False)
     return c
