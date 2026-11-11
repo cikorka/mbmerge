@@ -135,7 +135,7 @@ def collect(args):
 
 
 def plain_mosaic(files, work, args):
-    """Mosaic of inputs that need nothing but a coordinate system, or None.
+    """(mosaic, SRS given to it) of inputs that need nothing but a coordinate system, or None.
 
     A national orthophoto is ~16 000 JPEG sheets with world files: preparing them one by
     one (two GDAL processes each) took 38 minutes. When no input is a PDF, none has a
@@ -165,14 +165,113 @@ def plain_mosaic(files, work, args):
     if without_srs and not args.s_srs:
         raise TileError(f"{Path(files[0]).name} has no coordinate system (a world file alone does not define one); "
                         "pass --s-srs, e.g. --s-srs EPSG:5514")
-    listing = work / "inputs.txt"
-    listing.write_text("".join(f"{f}\n" for f in files), encoding="utf-8")
-    src = work / "mosaic.vrt"
-    cmd = ["gdalbuildvrt", "-q", "-addalpha", "-resolution", "highest", "-input_file_list", listing]
-    if without_srs:
-        cmd += ["-a_srs", args.s_srs]
-    run(cmd + [src], args)
-    return src
+    return build_mosaic(files, work / "mosaic.vrt", work, args, a_srs=args.s_srs if without_srs else None), \
+        (args.s_srs if without_srs else None)
+
+
+def build_mosaic(inputs, out, work, args, a_srs=None, res=None):
+    """gdalbuildvrt of `inputs` (later on top) with an alpha band; at `res` (source units) if given.
+
+    At a coarser `res` every input is read downsampled with averaging, so it can use its own
+    overviews (a JPEG decodes at 1/2, 1/4 or 1/8 by DCT scaling).
+    """
+    listing = work / f"{out.stem}.txt"
+    listing.write_text("".join(f"{f}\n" for f in inputs), encoding="utf-8")
+    cmd = ["gdalbuildvrt", "-q", "-addalpha", "-input_file_list", listing]
+    cmd += ["-resolution", "highest"] if res is None else ["-resolution", "user", "-tr", repr(res), repr(res),
+                                                          "-r", "average"]
+    if a_srs:
+        cmd += ["-a_srs", a_srs]
+    run(cmd + [out], args)
+    return out
+
+
+def reduced_mosaic(src, inputs, a_srs, native, target, work, args):
+    """The mosaic at a coarser power-of-two resolution when the warp would otherwise read every input
+    at full resolution; (src, 1) when not needed.
+
+    gdalwarp reads overviews of its source, and a mosaic VRT exposes implicit overviews only when
+    GDAL can derive them from all its inputs. The 16 316 sheets of the Czech orthophoto (ten of
+    them at another resolution) get none: a z15 run decoded every sheet at full resolution, row
+    of tiles after row, and averaged 12 x 12 pixels, about 40 times the CPU of the same sheets
+    with overviews. The factor is the largest power of two not coarser than the target, which
+    is the level gdalwarp picks from real overviews.
+    """
+    factor = 1
+    while native * factor * 2 <= target:
+        factor *= 2
+    if factor < 2 or len(inputs) < 2:
+        return src, 1
+    meta = info(src, args)
+    if meta["bands"] and meta["bands"][0].get("overviews"):
+        return src, 1
+    pixel = abs(meta["geoTransform"][1]) * factor
+    out = build_mosaic(inputs, work / "reduced.vrt", work, args, a_srs=a_srs, res=pixel)
+    read_overviews(out)
+    return out, factor
+
+
+def overview_levels(path):
+    """[(decimation, width, height, block_x, block_y)] of the overviews of band 1, finest first."""
+    from osgeo import gdal
+
+    with gdal.ExceptionMgr(useExceptions=False):  # broken EXIF blocks report errors, pixels read fine
+        ds = gdal.Open(str(path))
+        if ds is None:
+            return []
+        band = ds.GetRasterBand(1)
+        levels = []
+        for i in range(band.GetOverviewCount()):
+            ovr = band.GetOverview(i)
+            levels.append((ds.RasterXSize / ovr.XSize, ovr.XSize, ovr.YSize, *ovr.GetBlockSize()))
+    return levels
+
+
+def read_overviews(vrt):
+    """Point every source of a downsampled mosaic VRT at the overview of its input it needs.
+
+    A source read from full resolution into a smaller window goes through GDAL's generic
+    downsampling: the warp of the Czech orthophoto at z15 spent 18 s per 512 x 128 block,
+    decoding each JPEG again for every band and block. Opened at an overview level
+    (OVERVIEW_LEVEL, JPEG: DCT scaling) the same block takes 0.3 s; this is what GDAL's
+    implicit VRT overviews do when it can derive them for all inputs.
+    """
+    import xml.etree.ElementTree as ET
+    from concurrent.futures import ThreadPoolExecutor
+
+    vrt = Path(vrt)
+    tree = ET.parse(vrt)
+    sources = [s for band in tree.getroot().findall("VRTRasterBand") for s in band
+               if s.tag in ("SimpleSource", "ComplexSource")]
+    def path_of(source):
+        name = source.find("SourceFilename")
+        return str(vrt.parent / name.text) if name.get("relativeToVRT") == "1" else name.text
+
+    names = sorted({path_of(s) for s in sources})
+    with ThreadPoolExecutor(max_workers=min(16, os.cpu_count() or 1)) as pool:
+        levels = dict(zip(names, pool.map(overview_levels, names)))
+    for source in sources:
+        if source.find("OpenOptions") is not None:
+            continue
+        src, dst, props = source.find("SrcRect"), source.find("DstRect"), source.find("SourceProperties")
+        need = float(src.get("xSize")) / float(dst.get("xSize"))  # input pixels per mosaic pixel
+        usable = [(i, lv) for i, lv in enumerate(levels[path_of(source)]) if lv[0] <= need * 1.001]
+        if not usable:
+            continue
+        level, (decimation, width, height, bx, by) = usable[-1]
+        ratio_x = width / float(props.get("RasterXSize")) if props is not None else 1 / decimation
+        ratio_y = height / float(props.get("RasterYSize")) if props is not None else 1 / decimation
+        for key, ratio in (("xOff", ratio_x), ("xSize", ratio_x), ("yOff", ratio_y), ("ySize", ratio_y)):
+            src.set(key, repr(float(src.get(key)) * ratio))
+        if props is not None:
+            props.set("RasterXSize", str(width))
+            props.set("RasterYSize", str(height))
+            props.set("BlockXSize", str(bx))
+            props.set("BlockYSize", str(by))
+        options = ET.Element("OpenOptions")
+        ET.SubElement(options, "OOI", key="OVERVIEW_LEVEL").text = str(level)
+        source.insert(list(source).index(source.find("SourceFilename")) + 1, options)
+    tree.write(vrt, encoding="utf-8")
 
 
 def prepare_input(index, path, work, args):
@@ -376,6 +475,11 @@ def tile_rows_worker(jobs, results, cfg):
         ts, res, (ox, oy) = cfg["tile_size"], cfg["res"], cfg["origin"]
         px0, py0, width, height = cfg["px0"], cfg["py0"], cfg["width"], cfg["height"]
         zoom, depth, threshold = cfg["zoom"], cfg["depth"], cfg["binary_alpha"]
+        balancer = None
+        if cfg["balance"] is not None:
+            from balance_mbtiles import Balancer
+
+            balancer = Balancer(cfg["balance"])
         grader = None
         if cfg["grade"] is not None:
             from grade_mbtiles import Grader
@@ -414,6 +518,8 @@ def tile_rows_worker(jobs, results, cfg):
                 view[..., 3] = data[1]
             else:
                 view[...] = data.transpose(1, 2, 0)
+            if balancer is not None:  # balance by position, then the global grade on balanced pixels
+                balancer(view, ox + rx0 * res, oy - ry0 * res, res)
             if grader is not None:  # before binary alpha and encoding: every level inherits it, no extra round trip
                 grader(view)
             if layer is not None:
@@ -539,7 +645,8 @@ def write_base(db, vrt, cut, layout, args, plan, done):
         jobs.put(None)
     cfg = {**layout, **encoding(args), "vrt": str(vrt), "cut": str(cut) if cut else None, "depth": depth,
            "binary_alpha": args.binary_alpha, "keep_empty": args.keep_empty,
-           "inside": TileRange(layout), "worker_cache_mib": args.worker_cache_mib, "grade": args.grade_values}
+           "inside": TileRange(layout), "worker_cache_mib": args.worker_cache_mib, "grade": args.grade_values,
+           "balance": args.balance_path}
     procs = [ctx.Process(target=tile_rows_worker, args=(jobs, results, cfg), daemon=True) for _ in range(workers)]
     # rows of rectangles finished before a resume count too: rows_done/rows is the progress of the whole output
     done_rows = sum(r1 - r0 for _, _, r0, r1 in done)
@@ -780,6 +887,15 @@ def write_mbtiles(output, vrt, cut, zoom, min_zoom, args, settings, inputs=()):
 
 def tile(args):
     """`mbmerge tile`: inputs -> flat MBTiles for `mbmerge merge`."""
+    args.balance_values = args.balance_path = None
+    if args.balance:
+        from balance_mbtiles import BalanceError, contract as balance_contract
+
+        args.balance_path = str(Path(args.balance).expanduser().resolve())
+        try:  # the file hash enters the resume contract: another field cannot continue this output
+            args.balance_values = balance_contract(args.balance_path)
+        except (OSError, ValueError, KeyError, BalanceError) as exc:
+            raise TileError(f"--balance {args.balance}: {exc}") from exc
     args.grade_values = None
     if args.grade:
         from grade_mbtiles import GradeError, contract, load
@@ -801,14 +917,16 @@ def tile(args):
     files = collect(args)
     with tempfile.TemporaryDirectory(prefix="mbmerge-tile-", dir=args.work_dir) as tmp:
         work = Path(tmp)
-        src = plain_mosaic(files, work, args)
-        if src is None:
-            prepared = [prepare_input(i, p, work, args) for i, p in enumerate(files)]
-            if len(prepared) == 1:
-                src = prepared[0]
+        plain = plain_mosaic(files, work, args)
+        if plain is not None:
+            src, mosaic_srs = plain
+            mosaic_inputs = files
+        else:
+            mosaic_inputs, mosaic_srs = [prepare_input(i, p, work, args) for i, p in enumerate(files)], None
+            if len(mosaic_inputs) == 1:
+                src = mosaic_inputs[0]
             else:
-                src = work / "mosaic.vrt"
-                run(["gdalbuildvrt", "-q", "-addalpha", "-resolution", "highest", src, *prepared], args)
+                src = build_mosaic(mosaic_inputs, work / "mosaic.vrt", work, args)
         native = native_resolution(src, work, args)
         zoom = args.zoom if args.zoom is not None else tile_zoom(native, args.tile_size)
         min_zoom = zoom if args.min_zoom is None else args.min_zoom
@@ -818,6 +936,9 @@ def tile(args):
         resampling = args.resampling
         if resampling == "auto":
             resampling = "average" if native < target / 1.2 else "bilinear"
+        factor = 1
+        if resampling == "average":
+            src, factor = reduced_mosaic(src, mosaic_inputs, mosaic_srs, native, target, work, args)
         warped, cut = warp(src, work, zoom, resampling, args)
         settings = {"gdal": version, "zoom": zoom, "min_zoom": min_zoom, "tile_size": args.tile_size,
                     "native_resolution_m": round(native, 4), "resampling": resampling,
@@ -827,6 +948,10 @@ def tile(args):
                     "collar": [list(c) for c in args.collar], "near": args.near if args.collar else None,
                     "binary_alpha": args.binary_alpha, "cutline": bool(args.cutline), "cwhere": args.cwhere,
                     "inputs": len(files), "grade": args.grade_values}
+        if factor > 1:  # absent key: outputs and .tmp files of earlier versions stay resumable
+            settings["read_factor"] = factor
+        if args.balance_values is not None:  # absent key: outputs and .tmp files of earlier versions stay resumable
+            settings["balance"] = args.balance_values
         # path, size and mtime of every input: resuming over changed sources would mix two versions
         inputs = [[str(f), f.stat().st_size, f.stat().st_mtime_ns] for f in map(Path, files)]
         stats = write_mbtiles(output, warped, cut, zoom, min_zoom, args, settings, inputs)
@@ -875,6 +1000,8 @@ def add_parser(sub, positive):
                    help="worker processes (each reads and encodes its own rows of tiles)")
     t.add_argument("--grade", metavar="GRADE_JSON",
                    help="colour grade from `mbmerge grade`, applied to every pixel before encoding")
+    t.add_argument("--balance", metavar="BALANCE_NPZ",
+                   help="balance from `mbmerge balance`, applied to every pixel before --grade")
     t.add_argument("--worker-cache-mib", type=positive, default=WORKER_CACHE_MIB,
                    help=f"GDAL block cache of each worker in MiB (default {WORKER_CACHE_MIB})")
     t.add_argument("--work-dir", help="directory for temporary files: rasterized PDFs, collar masks, VRTs "

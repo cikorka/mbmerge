@@ -1333,6 +1333,8 @@ def parser():
     add_compare_parser(sub)
     from grade_mbtiles import add_parser as add_grade_parser
     add_grade_parser(sub)
+    from balance_mbtiles import add_parser as add_balance_parser
+    add_balance_parser(sub)
     return p
 
 
