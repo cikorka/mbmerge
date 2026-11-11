@@ -2,7 +2,7 @@
 
 **English** | [Čeština](CHANGELOG.cs.md)
 
-## Unreleased
+## 2.5.0 — 2026-11-11
 
 - `mbmerge balance --landcover RASTER` gives a mosaic of map sheets flown on different days one exposure and colour. Every sheet is anchored on land that looks the same on any summer day (by default WorldCover forests and built-up areas): the percentiles of these classes are mapped onto the national ones. Strips along the sheet edges are compared at nodes every 250 units by robust orthogonal regression, between flights only on that land, so harvested fields do not shift a block. Node grids of log gain and offset per channel are solved for all sheets together as a membrane: seams closed, smooth inside sheets, pulled towards the anchors. `tile --balance` applies it per output pixel before `--grade` and records it in the metadata and the resume contract. `grade --balance` measures and previews the grade on the balanced mosaic (linked levels by default), and `compare --balance` balances the reference too.
 - `tile`: when the base zoom is coarser than the inputs and the mosaic has no overviews (GDAL derives implicit ones only when it can for every input; the 16 316 sheets of the Czech orthophoto get none), the mosaic is built at the largest power-of-two coarser resolution not coarser than the target, and every input is opened at the overview level it needs (`OVERVIEW_LEVEL`; JPEG: DCT scaling), as GDAL's implicit overviews would do. Before, every 512 x 128 block of the warp decoded its sheets again at full resolution: a z15 run of the whole country managed 2 tiles per second on 32 workers. Recorded as `read_factor` in the metadata and the resume contract.

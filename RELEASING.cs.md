@@ -8,7 +8,7 @@ Balíček, repozitář i příkaz se jmenují **mbmerge**. GitHub Packages můž
 
 Jediným zdrojem verze je `VERSION` v [merge_mbtiles.py](merge_mbtiles.py). Setuptools načte stejnou hodnotu do wheelu a zdrojového archivu, CLI ji vypíše a `mbmerge.__version__` ji zpřístupní v Pythonu. Nedopisuj další kopii do pyproject.toml. Databázové `SCHEMA_VERSION` je nezávislé číslo s pravidly z [ARCHITECTURE.cs.md](ARCHITECTURE.cs.md).
 
-Tento checkout připravuje `2.4.0`. Používej tagy `v2.4.0`, `v2.4.0` atd. Publikované vydání ani jeho tag nepřepisuj. Změny vydávej pod novým číslem. Úprava checkoutu ani push větve samy release nevytvářejí.
+Tento checkout připravuje `2.5.0`. Používej tagy `v2.5.0`, `v2.5.0` atd. Publikované vydání ani jeho tag nepřepisuj. Změny vydávej pod novým číslem. Úprava checkoutu ani push větve samy release nevytvářejí.
 
 - Patch, například `2.0.1`: kompatibilní opravy.
 - Minor, například `2.1.0`: kompatibilní nové funkce.
@@ -62,15 +62,15 @@ Projekt vznikne při první úspěšné důvěryhodné publikaci. Pending publis
 
 ```bash
 python -m pip install -r requirements.txt
-python -m pip install --index-url https://test.pypi.org/simple/ --no-deps 'mbmerge==2.4.0'
+python -m pip install --index-url https://test.pypi.org/simple/ --no-deps 'mbmerge==2.5.0'
 mbmerge --version
 ```
 
 3. Pokud měníš verzi, uprav `VERSION`, commitni finální soubory a pushni. Pro současnou verzi:
 
 ```bash
-git tag -a v2.4.0 -m "mbmerge 2.4.0"
-git push origin v2.4.0
+git tag -a v2.5.0 -m "mbmerge 2.5.0"
+git push origin v2.5.0
 ```
 
 4. Na GitHubu vytvoř a **zveřejni** Release pro existující tag. **Set as a pre-release** použij jen pro náhledy; produkční publikace je přeskočí. Napiš poznámky ke změnám a kompatibilitě. Workflow znovu ověří projekt, porovná tag s verzí distribucí a po schválení prostředí nahraje wheel/sdist na PyPI.
@@ -94,7 +94,7 @@ python -m pip install '.[release]'
 python -m unittest discover -s tests -v
 python -m build
 python -m twine check --strict dist/*
-python tools/check_release.py --dist-dir dist --tag v2.4.0
+python tools/check_release.py --dist-dir dist --tag v2.5.0
 python -m pip install --force-reinstall --no-deps dist/*.whl
 python -I tools/smoke_installed.py
 ```

@@ -2,7 +2,7 @@
 
 [English](CHANGELOG.md) | **Čeština**
 
-## Nevydáno
+## 2.5.0 — 2026-11-11
 
 - `mbmerge balance --landcover RASTR` dá mozaice mapových listů snímkovaných v různých dnech jednu expozici a barvu. Každý list ukotví na plochách, které vypadají v kterýkoli letní den stejně (výchozí jsou lesy a zástavba z WorldCover): percentily těchto tříd převede na celostátní. Proužky podél hran listů porovná v uzlech po 250 jednotkách robustní ortogonální regresí, mezi lety jen na těchto plochách, takže pole po žních blok neposunou. Mřížky uzlů s logaritmem zisku a posunem pro každý kanál řeší pro všechny listy společně jako membránu: švy uzavřené, uvnitř listů hladké, tažené ke kotvám. `tile --balance` je použije v každém výstupním pixelu před `--grade` a uloží je do metadat i do kontraktu navázání. `grade --balance` měří a ukáže barevnou úpravu na vyrovnané mozaice (výchozí jsou svázané úrovně) a `compare --balance` vyrovná i referenci.
 - `tile`: když je základní zoom hrubší než vstupy a mozaika nemá přehledy (GDAL odvodí implicitní jen tehdy, když to jde u všech vstupů; 16 316 listů českého ortofota žádné nedostane), postaví se mozaika v největším hrubším rozlišení o mocninu dvou, které není hrubší než cíl, a každý vstup se otevře v úrovni přehledu, kterou potřebuje (`OVERVIEW_LEVEL`; JPEG: škálování DCT), stejně jako by to udělaly implicitní přehledy GDAL. Dřív každý blok warpu 512 × 128 dekódoval listy znovu v plném rozlišení: z15 celé republiky dával 2 dlaždice za sekundu na 32 workerech. Ukládá se jako `read_factor` do metadat i do kontraktu navázání.
